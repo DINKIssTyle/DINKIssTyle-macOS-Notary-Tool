@@ -5,6 +5,7 @@ import Security
 private enum DistributionBuildError: LocalizedError {
     case commandFailed(String, Int32)
     case installerPackageUnavailable
+    case invalidInstallLocation
 
     var errorDescription: String? {
         switch self {
@@ -12,6 +13,8 @@ private enum DistributionBuildError: LocalizedError {
             return "\(command) failed with status \(status)."
         case .installerPackageUnavailable:
             return "The installer package could not be built, so it cannot be added to the disk image."
+        case .invalidInstallLocation:
+            return "The installer destination must be a valid path without parent-directory components."
         }
     }
 }
@@ -598,13 +601,17 @@ public class NotaryService: ObservableObject {
         let title = settings.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? appURL.deletingPathExtension().lastPathComponent
             : settings.title
+        let installLocation = try normalizedInstallLocation(settings.installLocation)
+        let installsForCurrentUser = settings.installationDomain == .currentUserHome
 
+        let displayedInstallLocation = installsForCurrentUser ? "~\(installLocation)" : installLocation
         appendLog("Creating component package...")
+        appendLog("Installer destination: \(settings.installationDomain.title) \(displayedInstallLocation)")
         let componentStatus = try await ShellManager.shared.runStream(
             executable: "/usr/bin/pkgbuild",
             arguments: [
                 "--component", workingTarget,
-                "--install-location", "/Applications",
+                "--install-location", installLocation,
                 "--identifier", identifier,
                 "--version", version,
                 componentURL.path
@@ -663,8 +670,8 @@ public class NotaryService: ObservableObject {
         <?xml version="1.0" encoding="utf-8"?>
         <installer-gui-script minSpecVersion="2">
             <title>\(xmlEscaped(title))</title>
-            <options customize="never" require-scripts="false" rootVolumeOnly="true"/>
-            <domains enable_anywhere="false" enable_currentUserHome="false" enable_localSystem="true"/>
+            <options customize="never" require-scripts="false" rootVolumeOnly="\(installsForCurrentUser ? "false" : "true")"/>
+            <domains enable_anywhere="false" enable_currentUserHome="\(installsForCurrentUser ? "true" : "false")" enable_localSystem="\(installsForCurrentUser ? "false" : "true")"/>
             \(presentationElements.joined(separator: "\n    "))
             <choices-outline>
                 <line choice="default">
@@ -705,6 +712,30 @@ public class NotaryService: ObservableObject {
         guard productStatus == 0 else {
             throw DistributionBuildError.commandFailed("productbuild", productStatus)
         }
+    }
+
+    private func normalizedInstallLocation(_ rawValue: String) throws -> String {
+        var value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else {
+            throw DistributionBuildError.invalidInstallLocation
+        }
+        if value == "~" {
+            value = "/"
+        } else if value.hasPrefix("~/") {
+            value.removeFirst()
+        } else if value.hasPrefix("~") {
+            throw DistributionBuildError.invalidInstallLocation
+        }
+        if !value.hasPrefix("/") {
+            value = "/" + value
+        }
+
+        let rawComponents = value.split(separator: "/", omittingEmptySubsequences: true)
+        guard !rawComponents.contains(".."), !value.contains("\0") else {
+            throw DistributionBuildError.invalidInstallLocation
+        }
+        let components = rawComponents.filter { $0 != "." }
+        return components.isEmpty ? "/" : "/" + components.joined(separator: "/")
     }
 
     private func buildCustomizedDiskImage(

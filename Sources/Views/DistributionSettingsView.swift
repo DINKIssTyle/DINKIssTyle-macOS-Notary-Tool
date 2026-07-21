@@ -48,6 +48,33 @@ struct InstallerCustomizationView: View {
 
             compactPicker("After Installation", selection: $settings.conclusionAction)
 
+            Divider()
+            DisclosureGroup {
+                VStack(alignment: .leading, spacing: 8) {
+                    compactPicker("Installation Scope", selection: $settings.installationDomain)
+
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Install Location")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.secondary)
+                        HStack(spacing: 2) {
+                            if settings.installationDomain == .currentUserHome {
+                                Text("~")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(.secondary)
+                            }
+                            TextField("/Applications", text: $settings.installLocation)
+                                .textFieldStyle(.roundedBorder)
+                                .font(.system(size: 10))
+                        }
+                    }
+                }
+                .padding(.top, 6)
+            } label: {
+                Text("Advanced Options")
+                    .font(.system(size: 10, weight: .semibold))
+            }
+
             Text("The progress and summary pages are controlled by macOS Installer. The optional content pages above are included only when enabled.")
                 .font(.system(size: 9))
                 .foregroundStyle(.tertiary)
@@ -102,6 +129,7 @@ struct InstallerCustomizationView: View {
         if let value = value as? InstallerConclusionAction { return value.title }
         if let value = value as? InstallerBackgroundAlignment { return value.title }
         if let value = value as? InstallerBackgroundScaling { return value.title }
+        if let value = value as? InstallerInstallationDomain { return value.title }
         return String(describing: value)
     }
 }

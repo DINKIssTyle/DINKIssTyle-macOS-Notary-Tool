@@ -14,6 +14,9 @@ echo "=== 1. Building executable target ==="
 swift build -c release --disable-sandbox -debug-info-format none
 
 echo "=== 2. Creating App Bundle Structure ==="
+if [ -d "$APP_BUNDLE" ]; then
+    chmod -R u+w "$APP_BUNDLE"
+fi
 rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_BUNDLE/Contents/MacOS"
 mkdir -p "$APP_BUNDLE/Contents/Resources"

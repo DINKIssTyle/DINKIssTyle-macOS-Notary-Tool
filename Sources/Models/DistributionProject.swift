@@ -36,6 +36,18 @@ public enum InstallerConclusionAction: String, CaseIterable, Codable, Hashable, 
     }
 }
 
+public enum InstallerInstallationDomain: String, CaseIterable, Codable, Hashable, Sendable {
+    case localSystem
+    case currentUserHome
+
+    public var title: String {
+        switch self {
+        case .localSystem: return "System"
+        case .currentUserHome: return "Current User"
+        }
+    }
+}
+
 public enum InstallerBackgroundAlignment: String, CaseIterable, Codable, Hashable, Sendable {
     case center
     case left
@@ -131,7 +143,40 @@ public struct InstallerSettings: Codable, Equatable, Sendable {
     public var backgroundScaling: InstallerBackgroundScaling = .proportional
     public var conclusionAction: InstallerConclusionAction = .none
 
+    public var installationDomain: InstallerInstallationDomain = .localSystem
+    public var installLocation = "/Applications"
+
     public init() {}
+
+    private enum CodingKeys: String, CodingKey {
+        case title, identifier, version
+        case showWelcome, welcomeText, showReadMe, readMeText
+        case showLicense, licenseText, showConclusion, conclusionText
+        case backgroundAssetName, backgroundAlignment, backgroundScaling, conclusionAction
+        case installationDomain, installLocation
+    }
+
+    public init(from decoder: Decoder) throws {
+        self.init()
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        title = try values.decodeIfPresent(String.self, forKey: .title) ?? title
+        identifier = try values.decodeIfPresent(String.self, forKey: .identifier) ?? identifier
+        version = try values.decodeIfPresent(String.self, forKey: .version) ?? version
+        showWelcome = try values.decodeIfPresent(Bool.self, forKey: .showWelcome) ?? showWelcome
+        welcomeText = try values.decodeIfPresent(String.self, forKey: .welcomeText) ?? welcomeText
+        showReadMe = try values.decodeIfPresent(Bool.self, forKey: .showReadMe) ?? showReadMe
+        readMeText = try values.decodeIfPresent(String.self, forKey: .readMeText) ?? readMeText
+        showLicense = try values.decodeIfPresent(Bool.self, forKey: .showLicense) ?? showLicense
+        licenseText = try values.decodeIfPresent(String.self, forKey: .licenseText) ?? licenseText
+        showConclusion = try values.decodeIfPresent(Bool.self, forKey: .showConclusion) ?? showConclusion
+        conclusionText = try values.decodeIfPresent(String.self, forKey: .conclusionText) ?? conclusionText
+        backgroundAssetName = try values.decodeIfPresent(String.self, forKey: .backgroundAssetName)
+        backgroundAlignment = try values.decodeIfPresent(InstallerBackgroundAlignment.self, forKey: .backgroundAlignment) ?? backgroundAlignment
+        backgroundScaling = try values.decodeIfPresent(InstallerBackgroundScaling.self, forKey: .backgroundScaling) ?? backgroundScaling
+        conclusionAction = try values.decodeIfPresent(InstallerConclusionAction.self, forKey: .conclusionAction) ?? conclusionAction
+        installationDomain = try values.decodeIfPresent(InstallerInstallationDomain.self, forKey: .installationDomain) ?? installationDomain
+        installLocation = try values.decodeIfPresent(String.self, forKey: .installLocation) ?? installLocation
+    }
 }
 
 public struct DiskImageSettings: Codable, Equatable, Sendable {

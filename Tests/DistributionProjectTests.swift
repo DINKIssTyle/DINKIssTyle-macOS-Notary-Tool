@@ -4,6 +4,12 @@ import XCTest
 @testable import DKST_macOS_Notary
 
 final class DistributionProjectTests: XCTestCase {
+    func testOlderInstallerSettingsUseSystemApplicationsDefaults() throws {
+        let settings = try JSONDecoder().decode(InstallerSettings.self, from: Data("{}".utf8))
+        XCTAssertEqual(settings.installationDomain, .localSystem)
+        XCTAssertEqual(settings.installLocation, "/Applications")
+    }
+
     func testOlderDiskImageSettingsDefaultToAppBundlePayload() throws {
         let settings = try JSONDecoder().decode(DiskImageSettings.self, from: Data("{}".utf8))
         XCTAssertFalse(settings.includeInstallerPackage)
@@ -166,6 +172,8 @@ final class DistributionProjectTests: XCTestCase {
         project.installer.showLicense = true
         project.installer.licenseText = "Example license"
         project.installer.conclusionAction = .requireLogout
+        project.installer.installationDomain = .currentUserHome
+        project.installer.installLocation = "/Library/Input Methods"
 
         let service = NotaryService()
         await service.startWorkflow(
@@ -187,6 +195,13 @@ final class DistributionProjectTests: XCTestCase {
 
         let packageURL = directory.appendingPathComponent("Test App.pkg")
         XCTAssertTrue(fileManager.fileExists(atPath: packageURL.path), service.logOutput)
+        XCTAssertTrue(service.logOutput.contains("Installer destination: Current User ~/Library/Input Methods"), service.logOutput)
+        let domainInfo = try ShellManager.shared.runSync(
+            executable: "/usr/sbin/installer",
+            arguments: ["-dominfo", "-pkg", packageURL.path]
+        )
+        XCTAssertEqual(domainInfo.status, 0, domainInfo.output)
+        XCTAssertTrue(domainInfo.output.contains("CurrentUserHomeDirectory"), domainInfo.output)
         XCTAssertEqual(service.currentStep, "Distribution Build Completed", service.logOutput)
     }
 
