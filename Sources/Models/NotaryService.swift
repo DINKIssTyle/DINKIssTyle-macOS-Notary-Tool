@@ -726,7 +726,7 @@ public class NotaryService: ObservableObject {
         try fileManager.createDirectory(at: mountDirectory, withIntermediateDirectories: true)
 
         let stagedPayloadURL = stagingDirectory.appendingPathComponent(payloadURL.lastPathComponent)
-        appendLog("Staging app bundle and disk image assets...")
+        appendLog("Staging disk image payload and assets...")
         let copyStatus = try await ShellManager.shared.runStream(
             executable: "/usr/bin/ditto",
             arguments: [workingTarget, stagedPayloadURL.path],
@@ -768,6 +768,26 @@ public class NotaryService: ObservableObject {
             ? payloadURL.deletingPathExtension().lastPathComponent
             : settings.volumeName
 
+        let width = min(max(settings.windowWidth, 420), 1600)
+        let height = min(max(settings.windowHeight, 260), 1000)
+        let iconSize = min(max(settings.iconSize, 32), 256)
+        let appX = settings.centerAppIcon ? width / 2 : min(max(settings.appIconX, 40), width - 40)
+        let appY = settings.centerAppIcon ? height / 2 : min(max(settings.appIconY, 70), height - 40)
+        let applicationsX = min(max(settings.applicationsIconX, 40), width - 40)
+        let applicationsY = min(max(settings.applicationsIconY, 70), height - 40)
+        let finderLayout = DSStoreWriter.Layout(
+            windowWidth: width,
+            windowHeight: height,
+            iconSize: iconSize,
+            payloadName: payloadURL.lastPathComponent,
+            payloadX: appX,
+            payloadY: appY,
+            includeApplicationsLink: settings.includeApplicationsLink,
+            applicationsX: applicationsX,
+            applicationsY: applicationsY,
+            backgroundFileName: backgroundFileName.isEmpty ? nil : backgroundFileName
+        )
+
         appendLog("Creating writable disk image...")
         let createStatus = try await ShellManager.shared.runStream(
             executable: "/usr/bin/hdiutil",
@@ -798,47 +818,10 @@ public class NotaryService: ObservableObject {
         var layoutError: Error?
         do {
             if hasVolumeIcon {
-                let setFileStatus = try await ShellManager.shared.runStream(
-                    executable: "/usr/bin/xcrun",
-                    arguments: ["SetFile", "-a", "C", mountDirectory.path],
-                    processId: activeProcessId
-                ) { _ in }
-                if setFileStatus != 0 {
-                    appendLog("Warning: The volume icon was copied, but its custom-icon Finder flag could not be set.")
-                }
+                try DSStoreWriter.setCustomVolumeIconFlag(at: mountDirectory)
             }
-
-            let width = min(max(settings.windowWidth, 420), 1600)
-            let height = min(max(settings.windowHeight, 260), 1000)
-            let iconSize = min(max(settings.iconSize, 32), 256)
-            let appX = settings.centerAppIcon ? width / 2 : min(max(settings.appIconX, 40), width - 40)
-            let appY = settings.centerAppIcon ? height / 2 : min(max(settings.appIconY, 70), height - 40)
-            let applicationsX = min(max(settings.applicationsIconX, 40), width - 40)
-            let applicationsY = min(max(settings.applicationsIconY, 70), height - 40)
-
-            let scriptURL = buildDirectory.appendingPathComponent("layout.applescript")
-            try diskImageLayoutScript.write(to: scriptURL, atomically: true, encoding: .utf8)
-            appendLog("Applying Finder window layout...")
-            let layoutStatus = try await ShellManager.shared.runStream(
-                executable: "/usr/bin/osascript",
-                arguments: [
-                    scriptURL.path,
-                    mountDirectory.lastPathComponent,
-                    mountDirectory.path,
-                    String(width), String(height), String(iconSize),
-                    payloadURL.lastPathComponent, String(appX), String(appY),
-                    settings.includeApplicationsLink ? "1" : "0",
-                    String(applicationsX), String(applicationsY),
-                    backgroundFileName
-                ],
-                processId: activeProcessId
-            ) { [weak self] line in
-                Task { @MainActor in self?.appendLog("  \(line)") }
-            }
-            if layoutStatus != 0 {
-                throw DistributionBuildError.commandFailed("osascript", layoutStatus)
-            }
-
+            appendLog("Writing Finder layout metadata directly...")
+            try DSStoreWriter.write(to: mountDirectory, volumeName: volumeName, layout: finderLayout)
             _ = try ShellManager.shared.runSync(executable: "/bin/sync", arguments: [])
         } catch {
             layoutError = error
@@ -870,60 +853,39 @@ public class NotaryService: ObservableObject {
         guard convertStatus == 0 else {
             throw DistributionBuildError.commandFailed("hdiutil convert", convertStatus)
         }
-    }
 
-    private var diskImageLayoutScript: String {
-        """
-        on run argv
-            set mountedDiskName to item 1 of argv
-            set mountedDiskPath to item 2 of argv
-            set windowWidth to (item 3 of argv) as integer
-            set windowHeight to (item 4 of argv) as integer
-            set requestedIconSize to (item 5 of argv) as integer
-            set appName to item 6 of argv
-            set appX to (item 7 of argv) as integer
-            set appY to (item 8 of argv) as integer
-            set hasApplicationsLink to item 9 of argv
-            set applicationsX to (item 10 of argv) as integer
-            set applicationsY to (item 11 of argv) as integer
-            set backgroundName to item 12 of argv
+        let verificationMountDirectory = buildDirectory.appendingPathComponent("verification", isDirectory: true)
+        try fileManager.createDirectory(at: verificationMountDirectory, withIntermediateDirectories: true)
+        appendLog("Remounting final disk image for metadata verification...")
+        let verificationAttachStatus = try await ShellManager.shared.runStream(
+            executable: "/usr/bin/hdiutil",
+            arguments: ["attach", "-readonly", "-noverify", "-noautoopen", "-mountpoint", verificationMountDirectory.path, outputPath],
+            processId: activeProcessId
+        ) { [weak self] line in
+            Task { @MainActor in self?.appendLog("  \(line)") }
+        }
+        guard verificationAttachStatus == 0 else {
+            throw DistributionBuildError.commandFailed("hdiutil verification attach", verificationAttachStatus)
+        }
 
-            set backgroundFileAlias to missing value
-            if backgroundName is not "" then
-                set backgroundFileAlias to (POSIX file (mountedDiskPath & "/.background/" & backgroundName)) as alias
-            end if
-
-            tell application "Finder"
-                tell disk mountedDiskName
-                    open
-                    tell container window
-                        set current view to icon view
-                        set toolbar visible to false
-                        set statusbar visible to false
-                        set pathbar visible to false
-                        set bounds to {100, 100, 100 + windowWidth, 100 + windowHeight}
-                    end tell
-                    tell icon view options of container window
-                        set arrangement to not arranged
-                        set icon size to requestedIconSize
-                        set text size to 12
-                    end tell
-                    if backgroundFileAlias is not missing value then
-                        set background picture of icon view options of container window to backgroundFileAlias
-                    end if
-                    set position of item appName to {appX, appY}
-                    if hasApplicationsLink is "1" then
-                        set position of item "Applications" to {applicationsX, applicationsY}
-                    end if
-                    update without registering applications
-                    delay 1
-                    close container window
-                    open
-                    delay 1
-                end tell
-            end tell
-        end run
-        """
+        var verificationError: Error?
+        do {
+            try DSStoreWriter.verify(at: verificationMountDirectory, layout: finderLayout, requiresVolumeIcon: hasVolumeIcon)
+        } catch {
+            verificationError = error
+        }
+        let verificationDetachStatus = try await ShellManager.shared.runStream(
+            executable: "/usr/bin/hdiutil",
+            arguments: ["detach", verificationMountDirectory.path],
+            processId: activeProcessId
+        ) { [weak self] line in
+            Task { @MainActor in self?.appendLog("  \(line)") }
+        }
+        if let verificationError { throw verificationError }
+        guard verificationDetachStatus == 0 else {
+            throw DistributionBuildError.commandFailed("hdiutil verification detach", verificationDetachStatus)
+        }
+        appendLog("Verified: Finder layout, assets, and volume metadata are present in the final DMG.")
     }
 
     private func installerHTML(_ text: String, title: String) -> String {

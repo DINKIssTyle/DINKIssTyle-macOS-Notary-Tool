@@ -66,13 +66,6 @@ public class ShellManager: @unchecked Sendable {
             }
         }
         
-        do {
-            try process.run()
-        } catch {
-            onOutput("Failed to start process: \(error.localizedDescription)")
-            throw error
-        }
-        
         let fileHandle = pipe.fileHandleForReading
         
         // Read available chunks without waiting for EOF. Some macOS tools launch
@@ -84,13 +77,22 @@ public class ShellManager: @unchecked Sendable {
             outputBuffer.append(data).forEach(onOutput)
         }
 
-        let status = await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                process.waitUntilExit()
-                continuation.resume(returning: process.terminationStatus)
+        // A termination handler avoids `waitUntilExit()` run-loop stalls seen
+        // with hdiutil and other macOS tools that hand work to helper services.
+        let status: Int32 = try await withCheckedThrowingContinuation { continuation in
+            process.terminationHandler = { terminatedProcess in
+                continuation.resume(returning: terminatedProcess.terminationStatus)
+            }
+            do {
+                try process.run()
+            } catch {
+                process.terminationHandler = nil
+                onOutput("Failed to start process: \(error.localizedDescription)")
+                continuation.resume(throwing: error)
             }
         }
 
+        process.terminationHandler = nil
         fileHandle.readabilityHandler = nil
         if let remainingOutput = outputBuffer.flush() {
             onOutput(remainingOutput)

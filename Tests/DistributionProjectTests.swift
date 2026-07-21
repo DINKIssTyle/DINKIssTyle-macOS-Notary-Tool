@@ -62,6 +62,50 @@ final class DistributionProjectTests: XCTestCase {
         XCTAssertTrue(fileManager.fileExists(atPath: try XCTUnwrap(loaded.assets[.dmgBackground]).path))
     }
 
+    func testDSStoreWriterCreatesPortableFinderRecords() throws {
+        let fileManager = FileManager.default
+        let directory = fileManager.temporaryDirectory
+            .appendingPathComponent("dsstore-test-\(UUID().uuidString)", isDirectory: true)
+        let backgroundDirectory = directory.appendingPathComponent(".background", isDirectory: true)
+        defer { try? fileManager.removeItem(at: directory) }
+
+        try fileManager.createDirectory(at: backgroundDirectory, withIntermediateDirectories: true)
+        try Data([0x89, 0x50, 0x4e, 0x47]).write(to: backgroundDirectory.appendingPathComponent("background.png"))
+        try Data().write(to: directory.appendingPathComponent("Example.app"))
+        try fileManager.createSymbolicLink(
+            at: directory.appendingPathComponent("Applications"),
+            withDestinationURL: URL(fileURLWithPath: "/Applications", isDirectory: true)
+        )
+
+        let layout = DSStoreWriter.Layout(
+            windowWidth: 660,
+            windowHeight: 400,
+            iconSize: 96,
+            payloadName: "Example.app",
+            payloadX: 260,
+            payloadY: 190,
+            includeApplicationsLink: true,
+            applicationsX: 480,
+            applicationsY: 190,
+            backgroundFileName: "background.png"
+        )
+        try DSStoreWriter.write(to: directory, volumeName: "Portable Test", layout: layout)
+
+        let data = try Data(contentsOf: directory.appendingPathComponent(".DS_Store"))
+        let records = try DSStoreWriter.inspect(data)
+        XCTAssertTrue(data.starts(with: Data([0, 0, 0, 1]) + Data("Bud1".utf8)))
+        XCTAssertTrue(records.contains { $0.fileName == "." && $0.code == "bwsp" })
+        XCTAssertTrue(records.contains { $0.fileName == "." && $0.code == "icvp" })
+        XCTAssertTrue(records.contains { $0.fileName == "." && $0.code == "icvl" && String(data: $0.data, encoding: .ascii) == "icnv" })
+        XCTAssertTrue(records.contains { $0.fileName == "Example.app" && $0.code == "Iloc" })
+        XCTAssertTrue(records.contains { $0.fileName == "Applications" && $0.code == "Iloc" })
+
+        let icvp = try XCTUnwrap(records.first { $0.fileName == "." && $0.code == "icvp" })
+        let plist = try XCTUnwrap(PropertyListSerialization.propertyList(from: icvp.data, format: nil) as? [String: Any])
+        XCTAssertEqual((plist["backgroundType"] as? NSNumber)?.intValue, 2)
+        XCTAssertNotNil(plist["backgroundImageAlias"] as? Data)
+    }
+
     @MainActor
     func testCustomizedInstallerCanBeBuilt() async throws {
         let fileManager = FileManager.default
@@ -124,7 +168,7 @@ final class DistributionProjectTests: XCTestCase {
     @MainActor
     func testCustomizedDiskImageCanBeBuiltWhenEnabled() async throws {
         guard ProcessInfo.processInfo.environment["RUN_DMG_TEST"] == "1" else {
-            throw XCTSkip("Finder-driven DMG integration test is opt-in.")
+            throw XCTSkip("DMG integration test is opt-in.")
         }
 
         let fileManager = FileManager.default
@@ -187,6 +231,7 @@ final class DistributionProjectTests: XCTestCase {
         XCTAssertTrue(fileManager.fileExists(atPath: imageURL.path), service.logOutput)
         XCTAssertTrue(fileManager.fileExists(atPath: directory.appendingPathComponent("Test App.pkg").path), service.logOutput)
         XCTAssertTrue(service.logOutput.contains("DMG payload: completed installer package"), service.logOutput)
+        XCTAssertTrue(service.logOutput.contains("Verified: Finder layout, assets, and volume metadata"), service.logOutput)
         XCTAssertEqual(service.currentStep, "Distribution Build Completed", service.logOutput)
     }
 }
