@@ -145,6 +145,11 @@ final class DistributionProjectTests: XCTestCase {
         let appURL = directory.appendingPathComponent("Test App.app", isDirectory: true)
         let contentsURL = appURL.appendingPathComponent("Contents", isDirectory: true)
         let macOSURL = contentsURL.appendingPathComponent("MacOS", isDirectory: true)
+        let nestedAppURL = contentsURL
+            .appendingPathComponent("Resources", isDirectory: true)
+            .appendingPathComponent("Settings.app", isDirectory: true)
+        let nestedContentsURL = nestedAppURL.appendingPathComponent("Contents", isDirectory: true)
+        let nestedMacOSURL = nestedContentsURL.appendingPathComponent("MacOS", isDirectory: true)
         defer { try? fileManager.removeItem(at: directory) }
 
         try fileManager.createDirectory(at: macOSURL, withIntermediateDirectories: true)
@@ -162,6 +167,21 @@ final class DistributionProjectTests: XCTestCase {
         let plist = try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
         try plist.write(to: contentsURL.appendingPathComponent("Info.plist"))
 
+        try fileManager.createDirectory(at: nestedMacOSURL, withIntermediateDirectories: true)
+        let nestedExecutableURL = nestedMacOSURL.appendingPathComponent("Settings")
+        try Data(contentsOf: URL(fileURLWithPath: "/usr/bin/true")).write(to: nestedExecutableURL)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: nestedExecutableURL.path)
+        let nestedInfo: [String: Any] = [
+            "CFBundleIdentifier": "com.dinkisstyle.tests.test-app.settings",
+            "CFBundleName": "Settings",
+            "CFBundleExecutable": "Settings",
+            "CFBundlePackageType": "APPL",
+            "CFBundleShortVersionString": "1.2.3",
+            "CFBundleVersion": "123"
+        ]
+        let nestedPlist = try PropertyListSerialization.data(fromPropertyList: nestedInfo, format: .xml, options: 0)
+        try nestedPlist.write(to: nestedContentsURL.appendingPathComponent("Info.plist"))
+
         var project = DistributionProject()
         project.buildInstaller = true
         project.installer.title = "Test Installer"
@@ -178,7 +198,7 @@ final class DistributionProjectTests: XCTestCase {
         let service = NotaryService()
         await service.startWorkflow(
             fileUrl: appURL,
-            signAppIdentity: nil,
+            signAppIdentity: "-",
             packageToPkg: true,
             signPkgIdentity: nil,
             packageToDmg: false,
@@ -202,7 +222,37 @@ final class DistributionProjectTests: XCTestCase {
         )
         XCTAssertEqual(domainInfo.status, 0, domainInfo.output)
         XCTAssertTrue(domainInfo.output.contains("CurrentUserHomeDirectory"), domainInfo.output)
+        let outerVerification = try ShellManager.shared.runSync(
+            executable: "/usr/bin/codesign",
+            arguments: ["--verify", "--deep", "--strict", appURL.path]
+        )
+        XCTAssertEqual(outerVerification.status, 0, outerVerification.output)
+        let nestedVerification = try ShellManager.shared.runSync(
+            executable: "/usr/bin/codesign",
+            arguments: ["--verify", "--strict", nestedAppURL.path]
+        )
+        XCTAssertEqual(nestedVerification.status, 0, nestedVerification.output)
+        XCTAssertTrue(service.logOutput.contains("Signing: Contents/Resources/Settings.app"), service.logOutput)
         XCTAssertEqual(service.currentStep, "Distribution Build Completed", service.logOutput)
+
+        let nestedExecutable = try FileHandle(forWritingTo: nestedExecutableURL)
+        try nestedExecutable.seekToEnd()
+        try nestedExecutable.write(contentsOf: Data([0]))
+        try nestedExecutable.close()
+        let outerOnlyResign = try ShellManager.shared.runSync(
+            executable: "/usr/bin/codesign",
+            arguments: ["--force", "--options", "runtime", "-s", "-", appURL.path]
+        )
+        XCTAssertEqual(outerOnlyResign.status, 0, outerOnlyResign.output)
+        let misleadingOuterVerification = try ShellManager.shared.runSync(
+            executable: "/usr/bin/codesign",
+            arguments: ["--verify", "--deep", "--strict", appURL.path]
+        )
+        XCTAssertEqual(misleadingOuterVerification.status, 0, misleadingOuterVerification.output)
+
+        await service.verifyExistingSignature(targetPath: appURL.path)
+        XCTAssertEqual(service.verificationItems[0].status, .failure, service.logOutput)
+        XCTAssertTrue(service.logOutput.contains("Signature check: Contents/Resources/Settings.app"), service.logOutput)
     }
 
     @MainActor

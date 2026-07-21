@@ -838,12 +838,31 @@ struct NotaryView: View {
     private func checkIfAlreadySigned(path: String) {
         Task {
             do {
-                let (status, _) = try ShellManager.shared.runSync(
-                    executable: "/usr/bin/codesign",
-                    arguments: ["-d", path]
-                )
+                let targetURL = URL(fileURLWithPath: path)
+                let isValid: Bool
+                if targetURL.pathExtension.lowercased() == "pkg" {
+                    let (status, _) = try ShellManager.shared.runSync(
+                        executable: "/usr/sbin/pkgutil",
+                        arguments: ["--check-signature", path]
+                    )
+                    isValid = status == 0
+                } else {
+                    let targets = try CodeSigningSupport.signingTargets(in: targetURL)
+                    isValid = try targets.allSatisfy { target in
+                        var arguments = ["--verify", "--strict"]
+                        if target.path == targetURL.path {
+                            arguments.append("--deep")
+                        }
+                        arguments.append(target.path)
+                        let (status, _) = try ShellManager.shared.runSync(
+                            executable: "/usr/bin/codesign",
+                            arguments: arguments
+                        )
+                        return status == 0
+                    }
+                }
                 await MainActor.run {
-                    self.isAlreadySigned = (status == 0)
+                    self.isAlreadySigned = isValid
                 }
             } catch {
                 await MainActor.run {

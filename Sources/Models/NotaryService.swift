@@ -193,41 +193,32 @@ public class NotaryService: ObservableObject {
                 progress = 0.1
                 appendLog("\n--- 1. Code Signing .app ---")
                 
-                let args = [
-                    "--force",
-                    "--options", "runtime",
-                    "--timestamp",
-                    "--deep",
-                    "-s", identity,
-                    workingTarget
-                ]
-                
-                appendLog("Running: codesign " + args.joined(separator: " "))
                 do {
-                    let status = try await ShellManager.shared.runStream(
-                        executable: "/usr/bin/codesign",
-                        arguments: args,
-                        processId: activeProcessId
-                    ) { [weak self] line in
-                        Task { @MainActor in self?.appendLog("  \(line)") }
-                    }
-                    
-                    if status != 0 {
-                        appendLog("Error: codesign failed with status \(status)")
-                        isProcessing = false
-                        currentStep = "Failed at Code Sign"
-                        return
-                    }
-                    appendLog("Code signed successfully.")
+                    try await signCodeTree(at: URL(fileURLWithPath: workingTarget), identity: identity)
                 } catch {
                     appendLog("Code sign execution error: \(error.localizedDescription)")
                     isProcessing = false
-                    currentStep = "Failed"
+                    currentStep = "Failed at Code Sign"
                     return
                 }
             } else {
                 appendLog("Skipped: Code Signing (No certificate selected)")
             }
+        }
+
+        if fileExtension == "app" && performNotarization {
+            currentStep = "Validating Code Tree..."
+            appendLog("\n--- Code Signing Preflight ---")
+            let rootURL = URL(fileURLWithPath: workingTarget)
+            let signaturesAreValid = verifyCodeTree(at: rootURL)
+            let hardenedRuntimeIsValid = verifyHardenedRuntimeTree(at: rootURL)
+            guard signaturesAreValid && hardenedRuntimeIsValid else {
+                appendLog("Error: Nested code signing preflight failed. Notarization was not submitted.")
+                isProcessing = false
+                currentStep = "Failed Code Signing Preflight"
+                return
+            }
+            appendLog("Code signing preflight completed successfully.")
         }
 
         // 2. Notarize the .app bundle first so that packaged formats contain the stapled app.
@@ -570,6 +561,113 @@ public class NotaryService: ObservableObject {
             currentStep = "Distribution Build Completed"
             appendLog("\n=== Distribution Build Completed ===")
         }
+    }
+
+    private func signCodeTree(at rootURL: URL, identity: String) async throws {
+        let targets = try CodeSigningSupport.signingTargets(in: rootURL)
+        appendLog("Discovered \(targets.count - 1) nested code object(s). Signing inside out...")
+
+        for target in targets {
+            let relativeName = codeTargetName(target, relativeTo: rootURL)
+            appendLog("Signing: \(relativeName)")
+
+            var arguments = [
+                "--force",
+                "--options", "runtime",
+                "--preserve-metadata=entitlements"
+            ]
+            if identity != "-" {
+                arguments.append("--timestamp")
+            }
+            arguments.append(contentsOf: ["-s", identity, target.path])
+
+            let signStatus = try await ShellManager.shared.runStream(
+                executable: "/usr/bin/codesign",
+                arguments: arguments,
+                processId: activeProcessId
+            ) { [weak self] line in
+                Task { @MainActor in self?.appendLog("  \(line)") }
+            }
+            guard signStatus == 0 else {
+                throw DistributionBuildError.commandFailed("codesign \(relativeName)", signStatus)
+            }
+
+            var verificationArguments = ["--verify", "--strict", "--verbose=4"]
+            if target.path == rootURL.path {
+                verificationArguments.append("--deep")
+            }
+            verificationArguments.append(target.path)
+            let verificationStatus = try await ShellManager.shared.runStream(
+                executable: "/usr/bin/codesign",
+                arguments: verificationArguments,
+                processId: activeProcessId
+            ) { [weak self] line in
+                Task { @MainActor in self?.appendLog("  \(line)") }
+            }
+            guard verificationStatus == 0 else {
+                throw DistributionBuildError.commandFailed("codesign verification \(relativeName)", verificationStatus)
+            }
+        }
+
+        appendLog("Code tree signed and verified successfully.")
+    }
+
+    private func verifyCodeTree(at rootURL: URL) -> Bool {
+        do {
+            let targets = try CodeSigningSupport.signingTargets(in: rootURL)
+            var allValid = true
+            for target in targets {
+                let relativeName = codeTargetName(target, relativeTo: rootURL)
+                var arguments = ["--verify", "--strict", "--verbose=4"]
+                if target.path == rootURL.path {
+                    arguments.append("--deep")
+                }
+                arguments.append(target.path)
+                let (status, output) = try ShellManager.shared.runSync(
+                    executable: "/usr/bin/codesign",
+                    arguments: arguments
+                )
+                appendLog("Signature check: \(relativeName)")
+                appendLog(output)
+                if status != 0 { allValid = false }
+            }
+            return allValid
+        } catch {
+            appendLog("Code tree inspection failed: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    private func verifyHardenedRuntimeTree(at rootURL: URL) -> Bool {
+        do {
+            let targets = try CodeSigningSupport.signingTargets(in: rootURL)
+            var allHardened = true
+            for target in targets {
+                let relativeName = codeTargetName(target, relativeTo: rootURL)
+                let (status, output) = try ShellManager.shared.runSync(
+                    executable: "/usr/bin/codesign",
+                    arguments: ["-d", "--verbose=4", target.path]
+                )
+                let isHardened = status == 0 && (output.contains("flags=0x10000") || output.contains("runtime"))
+                appendLog("Hardened Runtime check: \(relativeName) — \(isHardened ? "enabled" : "missing")")
+                if !isHardened { allHardened = false }
+            }
+            return allHardened
+        } catch {
+            appendLog("Hardened Runtime inspection failed: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    private func codeTargetName(_ target: URL, relativeTo rootURL: URL) -> String {
+        let rootPath = rootURL.standardizedFileURL.path
+        let targetPath = target.standardizedFileURL.path
+        if targetPath == rootPath { return rootURL.lastPathComponent }
+        let prefix = rootPath + "/"
+        if targetPath.hasPrefix(prefix) {
+            return String(targetPath.dropFirst(prefix.count))
+        }
+        return target.lastPathComponent
     }
 
     private func buildCustomizedInstaller(
@@ -957,13 +1055,30 @@ public class NotaryService: ObservableObject {
         // 1. Code Signature Verification
         verificationItems[0].status = .running
         appendLog("Verifying signature integrity...")
-        let codesignArgs = ["--verify", "--verbose", "--deep", targetPath]
-        do {
-            let (status, output) = try ShellManager.shared.runSync(executable: "/usr/bin/codesign", arguments: codesignArgs)
-            appendLog(output)
-            verificationItems[0].status = (status == 0) ? .success : .failure
-        } catch {
-            verificationItems[0].status = .failure
+        if isPkg {
+            do {
+                let (status, output) = try ShellManager.shared.runSync(
+                    executable: "/usr/sbin/pkgutil",
+                    arguments: ["--check-signature", targetPath]
+                )
+                appendLog(output)
+                verificationItems[0].status = (status == 0) ? .success : .failure
+            } catch {
+                verificationItems[0].status = .failure
+            }
+        } else if URL(fileURLWithPath: targetPath).pathExtension.lowercased() == "app" {
+            verificationItems[0].status = verifyCodeTree(at: URL(fileURLWithPath: targetPath)) ? .success : .failure
+        } else {
+            do {
+                let (status, output) = try ShellManager.shared.runSync(
+                    executable: "/usr/bin/codesign",
+                    arguments: ["--verify", "--strict", "--verbose=4", targetPath]
+                )
+                appendLog(output)
+                verificationItems[0].status = (status == 0) ? .success : .failure
+            } catch {
+                verificationItems[0].status = .failure
+            }
         }
         
         // 2. Hardened Runtime Check (only for apps)
@@ -973,6 +1088,9 @@ public class NotaryService: ObservableObject {
             // or we display idle/success by default.
             verificationItems[1].status = .success
             appendLog("Skipped Hardened Runtime check (target is a installer package).")
+        } else if URL(fileURLWithPath: targetPath).pathExtension.lowercased() == "app" {
+            appendLog("Checking Hardened Runtime across the code tree...")
+            verificationItems[1].status = verifyHardenedRuntimeTree(at: URL(fileURLWithPath: targetPath)) ? .success : .failure
         } else {
             appendLog("Checking for Hardened Runtime flag...")
             let detailArgs = ["-d", "-vvv", targetPath]
@@ -1086,37 +1204,30 @@ public class NotaryService: ObservableObject {
         // 1. Code Signature
         verificationItems[0].status = .running
         appendLog("Checking code signature...")
-        let codesignArgs = ["-d", "-vvv", targetPath]
-        do {
-            let (status, output) = try ShellManager.shared.runSync(executable: "/usr/bin/codesign", arguments: codesignArgs)
-            appendLog(output)
-            verificationItems[0].status = (status == 0) ? .success : .failure
-        } catch {
-            verificationItems[0].status = .failure
-            appendLog("Codesign check error: \(error.localizedDescription)")
+        if isPkg {
+            do {
+                let (status, output) = try ShellManager.shared.runSync(
+                    executable: "/usr/sbin/pkgutil",
+                    arguments: ["--check-signature", targetPath]
+                )
+                appendLog(output)
+                verificationItems[0].status = (status == 0) ? .success : .failure
+            } catch {
+                verificationItems[0].status = .failure
+                appendLog("Package signature check error: \(error.localizedDescription)")
+            }
+        } else {
+            verificationItems[0].status = verifyCodeTree(at: URL(fileURLWithPath: targetPath)) ? .success : .failure
         }
         
         // 2. Hardened Runtime
         verificationItems[1].status = .running
-        appendLog("Checking Hardened Runtime...")
-        let codesignVerifyArgs = ["--display", "--verbose=4", targetPath]
-        do {
-            let (status, output) = try ShellManager.shared.runSync(executable: "/usr/bin/codesign", arguments: codesignVerifyArgs)
-            appendLog(output)
-            
-            if status == 0 {
-                let isHardened = output.contains("flags=0x10000") || output.contains("runtime")
-                verificationItems[1].status = isHardened ? .success : .failure
-                if isHardened {
-                    appendLog("Hardened Runtime is enabled.")
-                } else {
-                    appendLog("Hardened Runtime is NOT enabled.")
-                }
-            } else {
-                verificationItems[1].status = .failure
-            }
-        } catch {
-            verificationItems[1].status = .failure
+        if isPkg {
+            verificationItems[1].status = .success
+            appendLog("Skipped Hardened Runtime check (target is an installer package).")
+        } else {
+            appendLog("Checking Hardened Runtime across the code tree...")
+            verificationItems[1].status = verifyHardenedRuntimeTree(at: URL(fileURLWithPath: targetPath)) ? .success : .failure
         }
         
         // 3 & 4. Notarization Ticket / Stapled Ticket
