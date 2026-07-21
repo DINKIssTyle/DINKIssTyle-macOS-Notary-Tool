@@ -768,13 +768,18 @@ public class NotaryService: ObservableObject {
             ? payloadURL.deletingPathExtension().lastPathComponent
             : settings.volumeName
 
-        let width = min(max(settings.windowWidth, 420), 1600)
-        let height = min(max(settings.windowHeight, 260), 1000)
-        let iconSize = min(max(settings.iconSize, 32), 256)
-        let appX = settings.centerAppIcon ? width / 2 : min(max(settings.appIconX, 40), width - 40)
-        let appY = settings.centerAppIcon ? height / 2 : min(max(settings.appIconY, 70), height - 40)
-        let applicationsX = min(max(settings.applicationsIconX, 40), width - 40)
-        let applicationsY = min(max(settings.applicationsIconY, 70), height - 40)
+        let preset = settings.layoutTemplate.preset
+        let width = min(max(preset?.windowWidth ?? settings.windowWidth, 420), 1600)
+        let height = min(max(preset?.windowHeight ?? settings.windowHeight, 260), 1000)
+        let iconSize = min(max(preset?.iconSize ?? settings.iconSize, 32), 256)
+        let appX = preset?.appIconX
+            ?? (settings.centerAppIcon ? width / 2 : min(max(settings.appIconX, 40), width - 40))
+        let appY = preset?.appIconY
+            ?? (settings.centerAppIcon ? height / 2 : min(max(settings.appIconY, 70), height - 40))
+        let applicationsX = preset?.applicationsIconX
+            ?? min(max(settings.applicationsIconX, 40), width - 40)
+        let applicationsY = preset?.applicationsIconY
+            ?? min(max(settings.applicationsIconY, 70), height - 40)
         let finderLayout = DSStoreWriter.Layout(
             windowWidth: width,
             windowHeight: height,

@@ -8,6 +8,31 @@ final class DistributionProjectTests: XCTestCase {
         let settings = try JSONDecoder().decode(DiskImageSettings.self, from: Data("{}".utf8))
         XCTAssertFalse(settings.includeInstallerPackage)
         XCTAssertTrue(settings.includeApplicationsLink)
+        XCTAssertEqual(settings.layoutTemplate, .custom)
+    }
+
+    func testDiskImageLayoutTemplatesUseHiDPIPointCoordinates() {
+        var horizontal = DiskImageSettings()
+        horizontal.layoutTemplate = .template1
+        horizontal.applyLayoutTemplate()
+        XCTAssertEqual(horizontal.windowWidth, 620)
+        XCTAssertEqual(horizontal.windowHeight, 447)
+        XCTAssertEqual(horizontal.iconSize, 96)
+        XCTAssertEqual(horizontal.appIconX, 155)
+        XCTAssertEqual(horizontal.appIconY, 208)
+        XCTAssertEqual(horizontal.applicationsIconX, 465)
+        XCTAssertEqual(horizontal.applicationsIconY, 208)
+
+        var vertical = DiskImageSettings()
+        vertical.layoutTemplate = .template2
+        vertical.applyLayoutTemplate()
+        XCTAssertEqual(vertical.windowWidth, 620)
+        XCTAssertEqual(vertical.windowHeight, 447)
+        XCTAssertEqual(vertical.iconSize, 96)
+        XCTAssertEqual(vertical.appIconX, 313)
+        XCTAssertEqual(vertical.appIconY, 104)
+        XCTAssertEqual(vertical.applicationsIconX, 313)
+        XCTAssertEqual(vertical.applicationsIconY, 312)
     }
 
     func testPNGCanBeConvertedToICNS() throws {
@@ -202,9 +227,8 @@ final class DistributionProjectTests: XCTestCase {
         project.buildInstaller = true
         project.buildDiskImage = true
         project.diskImage.volumeName = "DKST DMG Test \(UUID().uuidString.prefix(6))"
-        project.diskImage.windowWidth = 540
-        project.diskImage.windowHeight = 340
-        project.diskImage.centerAppIcon = true
+        project.diskImage.layoutTemplate = .template1
+        project.diskImage.applyLayoutTemplate()
         project.diskImage.includeInstallerPackage = true
         project.diskImage.backgroundAssetName = backgroundURL.lastPathComponent
         project.diskImage.volumeIconAssetName = backgroundURL.lastPathComponent

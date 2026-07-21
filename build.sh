@@ -22,6 +22,16 @@ if [ -f "THIRD_PARTY_NOTICES.md" ]; then
     cp "THIRD_PARTY_NOTICES.md" "$APP_BUNDLE/Contents/Resources/THIRD_PARTY_NOTICES.md"
 fi
 
+TEMPLATE_RESOURCES_DIR="$APP_BUNDLE/Contents/Resources/Templates"
+mkdir -p "$TEMPLATE_RESOURCES_DIR"
+for TEMPLATE_FILE in "Templates/DMG-BG-TEMP1.psd" "Templates/DMG-BG-TEMP2.psd" "Templates/PKG-Installer-BG-TEMP.psd"; do
+    if [ -f "$TEMPLATE_FILE" ]; then
+        cp "$TEMPLATE_FILE" "$TEMPLATE_RESOURCES_DIR/"
+    fi
+done
+chmod 0444 "$TEMPLATE_RESOURCES_DIR"/*.psd
+chmod 0555 "$TEMPLATE_RESOURCES_DIR"
+
 echo "=== 3. Copying binary ==="
 cp ".build/release/$BINARY_NAME" "$APP_BUNDLE/Contents/MacOS/$BINARY_NAME"
 

@@ -133,9 +133,27 @@ enum DSStoreWriter {
                 throw DSStoreWriterError.invalidStore("missing \(key) record")
             }
         }
+        guard let browserRecord = records.first(where: { $0.fileName == "." && $0.code == "bwsp" }),
+              let browserSettings = try PropertyListSerialization.propertyList(from: browserRecord.data, format: nil) as? [String: Any],
+              browserSettings["WindowBounds"] as? String == "{{100, 100}, {\(layout.windowWidth), \(layout.windowHeight)}}" else {
+            throw DSStoreWriterError.invalidStore("incorrect Finder window size")
+        }
+        guard let iconViewRecord = records.first(where: { $0.fileName == "." && $0.code == "icvp" }),
+              let iconViewSettings = try PropertyListSerialization.propertyList(from: iconViewRecord.data, format: nil) as? [String: Any],
+              (iconViewSettings["iconSize"] as? NSNumber)?.intValue == layout.iconSize else {
+            throw DSStoreWriterError.invalidStore("incorrect Finder icon size")
+        }
+        guard records.first(where: { $0.fileName == layout.payloadName && $0.code == "Iloc" })?.data
+                == iconLocation(x: layout.payloadX, y: layout.payloadY) else {
+            throw DSStoreWriterError.invalidStore("incorrect payload icon location")
+        }
         if layout.includeApplicationsLink {
             guard keys.contains("Applications|Iloc") else {
                 throw DSStoreWriterError.invalidStore("missing Applications icon location")
+            }
+            guard records.first(where: { $0.fileName == "Applications" && $0.code == "Iloc" })?.data
+                    == iconLocation(x: layout.applicationsX, y: layout.applicationsY) else {
+                throw DSStoreWriterError.invalidStore("incorrect Applications icon location")
             }
             guard fileManager.fileExists(atPath: mountURL.appendingPathComponent("Applications").path) else {
                 throw DSStoreWriterError.invalidStore("missing Applications shortcut")
@@ -151,10 +169,8 @@ enum DSStoreWriter {
             guard fileManager.fileExists(atPath: backgroundURL.path) else {
                 throw DSStoreWriterError.invalidStore("missing background asset")
             }
-            guard let iconViewRecord = records.first(where: { $0.fileName == "." && $0.code == "icvp" }),
-                  let plist = try PropertyListSerialization.propertyList(from: iconViewRecord.data, format: nil) as? [String: Any],
-                  (plist["backgroundType"] as? NSNumber)?.intValue == 2,
-                  plist["backgroundImageAlias"] is Data else {
+            guard (iconViewSettings["backgroundType"] as? NSNumber)?.intValue == 2,
+                  iconViewSettings["backgroundImageAlias"] is Data else {
                 throw DSStoreWriterError.invalidStore("missing background alias")
             }
         }

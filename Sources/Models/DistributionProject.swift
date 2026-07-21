@@ -66,6 +66,52 @@ public enum InstallerBackgroundScaling: String, CaseIterable, Codable, Hashable,
     }
 }
 
+public enum DiskImageLayoutTemplate: String, CaseIterable, Codable, Hashable, Sendable {
+    case template1
+    case template2
+    case custom
+
+    public var title: String {
+        switch self {
+        case .template1: return "Template 1"
+        case .template2: return "Template 2"
+        case .custom: return "Custom"
+        }
+    }
+
+    var preset: DiskImageLayoutPreset? {
+        switch self {
+        case .template1:
+            // Source artwork: 1240 x 830 px at 144 DPI (2x = 620 x 415 pt).
+            // Finder's WindowBounds includes its ~32 pt title bar, while Iloc
+            // coordinates and the background use the content area.
+            return DiskImageLayoutPreset(
+                windowWidth: 620, windowHeight: 447, iconSize: 96,
+                appIconX: 155, appIconY: 208,
+                applicationsIconX: 465, applicationsIconY: 208
+            )
+        case .template2:
+            return DiskImageLayoutPreset(
+                windowWidth: 620, windowHeight: 447, iconSize: 96,
+                appIconX: 313, appIconY: 104,
+                applicationsIconX: 313, applicationsIconY: 312
+            )
+        case .custom:
+            return nil
+        }
+    }
+}
+
+struct DiskImageLayoutPreset: Equatable, Sendable {
+    let windowWidth: Int
+    let windowHeight: Int
+    let iconSize: Int
+    let appIconX: Int
+    let appIconY: Int
+    let applicationsIconX: Int
+    let applicationsIconY: Int
+}
+
 public struct InstallerSettings: Codable, Equatable, Sendable {
     public var title = ""
     public var identifier = ""
@@ -89,6 +135,7 @@ public struct InstallerSettings: Codable, Equatable, Sendable {
 }
 
 public struct DiskImageSettings: Codable, Equatable, Sendable {
+    public var layoutTemplate: DiskImageLayoutTemplate = .custom
     public var volumeName = ""
     public var windowWidth = 660
     public var windowHeight = 400
@@ -107,7 +154,21 @@ public struct DiskImageSettings: Codable, Equatable, Sendable {
 
     public init() {}
 
+    public mutating func applyLayoutTemplate() {
+        guard let preset = layoutTemplate.preset else { return }
+        windowWidth = preset.windowWidth
+        windowHeight = preset.windowHeight
+        iconSize = preset.iconSize
+        centerAppIcon = false
+        appIconX = preset.appIconX
+        appIconY = preset.appIconY
+        includeApplicationsLink = true
+        applicationsIconX = preset.applicationsIconX
+        applicationsIconY = preset.applicationsIconY
+    }
+
     private enum CodingKeys: String, CodingKey {
+        case layoutTemplate
         case volumeName, windowWidth, windowHeight, iconSize
         case includeInstallerPackage, centerAppIcon, appIconX, appIconY
         case includeApplicationsLink, applicationsIconX, applicationsIconY
@@ -117,6 +178,7 @@ public struct DiskImageSettings: Codable, Equatable, Sendable {
     public init(from decoder: Decoder) throws {
         self.init()
         let values = try decoder.container(keyedBy: CodingKeys.self)
+        layoutTemplate = try values.decodeIfPresent(DiskImageLayoutTemplate.self, forKey: .layoutTemplate) ?? .custom
         volumeName = try values.decodeIfPresent(String.self, forKey: .volumeName) ?? volumeName
         windowWidth = try values.decodeIfPresent(Int.self, forKey: .windowWidth) ?? windowWidth
         windowHeight = try values.decodeIfPresent(Int.self, forKey: .windowHeight) ?? windowHeight

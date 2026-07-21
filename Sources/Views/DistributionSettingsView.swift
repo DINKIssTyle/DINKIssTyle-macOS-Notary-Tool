@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct InstallerCustomizationView: View {
@@ -36,6 +37,7 @@ struct InstallerCustomizationView: View {
                 choose: chooseBackground,
                 remove: removeBackground
             )
+            ReadOnlyTemplateButton(fileName: "PKG-Installer-BG-TEMP.psd")
 
             if backgroundURL != nil {
                 HStack(spacing: 8) {
@@ -126,11 +128,31 @@ struct DiskImageCustomizationView: View {
 
             labeledTextField("Volume Name", text: $settings.volumeName, prompt: "App name")
 
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Layout Preset")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
+                Picker("", selection: $settings.layoutTemplate) {
+                    ForEach(DiskImageLayoutTemplate.allCases, id: \.self) { template in
+                        Text(template.title).tag(template)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .onChange(of: settings.layoutTemplate) { _ in
+                    settings.applyLayoutTemplate()
+                }
+                if let templateFileName {
+                    ReadOnlyTemplateButton(fileName: templateFileName)
+                }
+            }
+
             HStack(spacing: 8) {
                 integerField("Window Width", value: $settings.windowWidth)
                 integerField("Window Height", value: $settings.windowHeight)
                 integerField("Icon Size", value: $settings.iconSize)
             }
+            .disabled(!isCustomLayout)
 
             AssetPickerRow(
                 title: "Window Background",
@@ -148,14 +170,17 @@ struct DiskImageCustomizationView: View {
             )
 
             Divider()
-            Toggle(settings.includeInstallerPackage && canUseInstallerPackage ? "Center Installer Icon" : "Center App Icon", isOn: $settings.centerAppIcon)
-                .font(.system(size: 10, weight: .medium))
+            if isCustomLayout {
+                Toggle(settings.includeInstallerPackage && canUseInstallerPackage ? "Center Installer Icon" : "Center App Icon", isOn: $settings.centerAppIcon)
+                    .font(.system(size: 10, weight: .medium))
+            }
 
             if !settings.centerAppIcon {
                 HStack(spacing: 8) {
                     integerField(settings.includeInstallerPackage && canUseInstallerPackage ? "Installer X" : "App X", value: $settings.appIconX)
                     integerField(settings.includeInstallerPackage && canUseInstallerPackage ? "Installer Y" : "App Y", value: $settings.appIconY)
                 }
+                .disabled(!isCustomLayout)
             }
 
             if !(settings.includeInstallerPackage && canUseInstallerPackage) {
@@ -166,6 +191,7 @@ struct DiskImageCustomizationView: View {
                         integerField("Applications X", value: $settings.applicationsIconX)
                         integerField("Applications Y", value: $settings.applicationsIconY)
                     }
+                    .disabled(!isCustomLayout)
                 }
             }
 
@@ -176,6 +202,18 @@ struct DiskImageCustomizationView: View {
         }
         .padding(.leading, 12)
         .padding(.top, 2)
+    }
+
+    private var isCustomLayout: Bool {
+        settings.layoutTemplate == .custom
+    }
+
+    private var templateFileName: String? {
+        switch settings.layoutTemplate {
+        case .template1: return "DMG-BG-TEMP1.psd"
+        case .template2: return "DMG-BG-TEMP2.psd"
+        case .custom: return nil
+        }
     }
 
     private func labeledTextField(_ title: String, text: Binding<String>, prompt: String) -> some View {
@@ -195,6 +233,39 @@ struct DiskImageCustomizationView: View {
                 .font(.system(size: 10))
         }
         .frame(maxWidth: .infinity)
+    }
+}
+
+private struct ReadOnlyTemplateButton: View {
+    let fileName: String
+
+    var body: some View {
+        Button(action: openDocument) {
+            HStack(spacing: 4) {
+                Image(systemName: "arrow.up.forward.app")
+                Text("Edit \(fileName) as an easy starting point for your background (opens read-only).")
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .buttonStyle(.plain)
+        .font(.system(size: 9))
+        .foregroundStyle(documentURL == nil ? Color.secondary : Color.accentColor)
+        .disabled(documentURL == nil)
+    }
+
+    private var documentURL: URL? {
+        let name = (fileName as NSString).deletingPathExtension
+        let fileExtension = (fileName as NSString).pathExtension
+        return Bundle.main.url(
+            forResource: name,
+            withExtension: fileExtension,
+            subdirectory: "Templates"
+        )
+    }
+
+    private func openDocument() {
+        guard let documentURL else { return }
+        NSWorkspace.shared.open(documentURL)
     }
 }
 
