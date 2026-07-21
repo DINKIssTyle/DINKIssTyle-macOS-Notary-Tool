@@ -2,6 +2,17 @@ import Foundation
 import Combine
 import Security
 
+private enum DistributionBuildError: LocalizedError {
+    case commandFailed(String, Int32)
+
+    var errorDescription: String? {
+        switch self {
+        case let .commandFailed(command, status):
+            return "\(command) failed with status \(status)."
+        }
+    }
+}
+
 public enum VerificationStatus: String, Sendable, Codable {
     case idle
     case running
@@ -142,6 +153,8 @@ public class NotaryService: ObservableObject {
         signPkgIdentity: String?,
         packageToDmg: Bool,
         packageToZip: Bool,
+        distributionProject: DistributionProject,
+        distributionAssets: [DistributionAssetKind: URL],
         performNotarization: Bool,
         credentialType: CredentialType,
         keychainProfile: String,
@@ -337,95 +350,58 @@ public class NotaryService: ObservableObject {
             progress = 0.6
             let dmgOutputPath = parentDir.appendingPathComponent("\(appName).dmg").path
             appendLog("\n--- 3b. Building Disk Image (.dmg) ---")
-            
+
             do {
-                let stagingDir = tempDir.appendingPathComponent("dmg_staging_\(UUID().uuidString)")
-                try fileManager.createDirectory(at: stagingDir, withIntermediateDirectories: true)
-                let stagedAppPath = stagingDir.appendingPathComponent(fileUrl.lastPathComponent).path
-                
-                // Copy app using ditto to preserve signatures/stapler tickets
-                appendLog("Staging app bundle...")
-                let cpStatus = try await ShellManager.shared.runStream(
-                    executable: "/usr/bin/ditto",
-                    arguments: [workingTarget, stagedAppPath],
-                    processId: activeProcessId
-                ) { _ in }
-                
-                if cpStatus == 0 {
-                    if fileManager.fileExists(atPath: dmgOutputPath) {
-                        try? fileManager.removeItem(atPath: dmgOutputPath)
-                    }
-                    
-                    // Create DMG using hdiutil
-                    appendLog("Creating DMG using hdiutil...")
-                    let hdiutilArgs = ["create", "-srcfolder", stagingDir.path, "-volname", appName, "-fs", "HFS+", "-format", "UDZO", "-ov", dmgOutputPath]
-                    let hdiStatus = try await ShellManager.shared.runStream(
-                        executable: "/usr/bin/hdiutil",
-                        arguments: hdiutilArgs,
+                try await buildCustomizedDiskImage(
+                    appURL: fileUrl,
+                    workingTarget: workingTarget,
+                    outputPath: dmgOutputPath,
+                    settings: distributionProject.diskImage,
+                    assets: distributionAssets
+                )
+                appendLog("DMG disk image created at: \(dmgOutputPath)")
+
+                if let identity = signAppIdentity, !identity.isEmpty {
+                    appendLog("Signing DMG...")
+                    let signStatus = try await ShellManager.shared.runStream(
+                        executable: "/usr/bin/codesign",
+                        arguments: ["--force", "--timestamp", "-s", identity, dmgOutputPath],
                         processId: activeProcessId
                     ) { [weak self] line in
                         Task { @MainActor in self?.appendLog("  \(line)") }
                     }
-                    
-                    try? fileManager.removeItem(at: stagingDir)
-                    
-                    if hdiStatus == 0 {
-                        appendLog("DMG disk image created at: \(dmgOutputPath)")
-                        
-                        // Sign DMG (if codesign is configured)
-                        if let identity = signAppIdentity, !identity.isEmpty {
-                            appendLog("Signing DMG...")
-                            let signDmgArgs = ["--force", "--timestamp", "-s", identity, dmgOutputPath]
-                            let _ = try await ShellManager.shared.runStream(
-                                executable: "/usr/bin/codesign",
-                                arguments: signDmgArgs,
-                                processId: activeProcessId
-                            ) { [weak self] line in
-                                Task { @MainActor in self?.appendLog("  \(line)") }
-                            }
-                        }
-                        
-                        if performNotarization {
-                            appendLog("Notarizing DMG...")
-                            var notaryArgs = ["notarytool", "submit", dmgOutputPath, "--wait"]
-                            if credentialType == .keychainProfile {
-                                notaryArgs.append(contentsOf: ["--keychain-profile", keychainProfile])
-                            } else {
-                                notaryArgs.append(contentsOf: ["--key-id", apiKeyId, "--issuer", apiIssuerId, "--key", apiKeyPath])
-                            }
+                    if signStatus != 0 { throw DistributionBuildError.commandFailed("codesign", signStatus) }
+                }
 
-                            let submitDmgStatus = try await ShellManager.shared.runStream(
-                                executable: "/usr/bin/xcrun",
-                                arguments: notaryArgs,
-                                processId: activeProcessId
-                            ) { [weak self] line in
-                                Task { @MainActor in self?.appendLog("  \(line)") }
-                            }
-
-                            if submitDmgStatus == 0 {
-                                appendLog("Stapling ticket to DMG...")
-                                let stapleArgs = ["stapler", "staple", dmgOutputPath]
-                                let _ = try await ShellManager.shared.runStream(
-                                    executable: "/usr/bin/xcrun",
-                                    arguments: stapleArgs,
-                                    processId: activeProcessId
-                                ) { [weak self] line in
-                                    Task { @MainActor in self?.appendLog("  \(line)") }
-                                }
-                                appendLog("DMG package is now signed, notarized, and stapled.")
-                            } else {
-                                appendLog("Warning: DMG notarization failed.")
-                            }
-                        } else {
-                            appendLog("Skipped: DMG notarization (distribution-only build)")
+                if performNotarization {
+                    appendLog("Notarizing DMG...")
+                    var notaryArgs = ["notarytool", "submit", dmgOutputPath, "--wait"]
+                    if credentialType == .keychainProfile {
+                        notaryArgs.append(contentsOf: ["--keychain-profile", keychainProfile])
+                    } else {
+                        notaryArgs.append(contentsOf: ["--key-id", apiKeyId, "--issuer", apiIssuerId, "--key", apiKeyPath])
+                    }
+                    let submitStatus = try await ShellManager.shared.runStream(
+                        executable: "/usr/bin/xcrun",
+                        arguments: notaryArgs,
+                        processId: activeProcessId
+                    ) { [weak self] line in
+                        Task { @MainActor in self?.appendLog("  \(line)") }
+                    }
+                    if submitStatus == 0 {
+                        appendLog("Stapling ticket to DMG...")
+                        _ = try await ShellManager.shared.runStream(
+                            executable: "/usr/bin/xcrun",
+                            arguments: ["stapler", "staple", dmgOutputPath],
+                            processId: activeProcessId
+                        ) { [weak self] line in
+                            Task { @MainActor in self?.appendLog("  \(line)") }
                         }
                     } else {
-                        distributionBuildHadError = true
-                        appendLog("Error: hdiutil failed with status \(hdiStatus)")
+                        appendLog("Warning: DMG notarization failed.")
                     }
                 } else {
-                    distributionBuildHadError = true
-                    appendLog("Error: Failed to copy app to staging directory.")
+                    appendLog("Skipped: DMG notarization (distribution-only build)")
                 }
             } catch {
                 distributionBuildHadError = true
@@ -439,72 +415,53 @@ public class NotaryService: ObservableObject {
             progress = 0.7
             let pkgOutputPath = parentDir.appendingPathComponent("\(appName).pkg").path
             appendLog("\n--- 3c. Building Installer Package (.pkg) ---")
-            
-            var args = ["--component", workingTarget, "/Applications"]
-            if let pkgIdentity = signPkgIdentity, !pkgIdentity.isEmpty {
-                args.append(contentsOf: ["--sign", pkgIdentity])
-            }
-            args.append(pkgOutputPath)
-            
-            appendLog("Running: productbuild " + args.joined(separator: " "))
-            
-            do {
-                if fileManager.fileExists(atPath: pkgOutputPath) {
-                    try? fileManager.removeItem(atPath: pkgOutputPath)
-                }
-                
-                let status = try await ShellManager.shared.runStream(
-                    executable: "/usr/bin/productbuild",
-                    arguments: args,
-                    processId: activeProcessId
-                ) { [weak self] line in
-                    Task { @MainActor in self?.appendLog("  \(line)") }
-                }
-                
-                if status == 0 {
-                    appendLog("Package created at: \(pkgOutputPath)")
 
-                    if !packageToDmg {
-                        workingTarget = pkgOutputPath
+            do {
+                try await buildCustomizedInstaller(
+                    appURL: fileUrl,
+                    workingTarget: workingTarget,
+                    outputPath: pkgOutputPath,
+                    signingIdentity: signPkgIdentity,
+                    settings: distributionProject.installer,
+                    assets: distributionAssets
+                )
+                appendLog("Package created at: \(pkgOutputPath)")
+
+                if !packageToDmg {
+                    workingTarget = pkgOutputPath
+                }
+
+                if performNotarization {
+                    appendLog("Notarizing PKG...")
+                    var notaryArgs = ["notarytool", "submit", pkgOutputPath, "--wait"]
+                    if credentialType == .keychainProfile {
+                        notaryArgs.append(contentsOf: ["--keychain-profile", keychainProfile])
+                    } else {
+                        notaryArgs.append(contentsOf: ["--key-id", apiKeyId, "--issuer", apiIssuerId, "--key", apiKeyPath])
                     }
 
-                    if performNotarization {
-                        appendLog("Notarizing PKG...")
-                        var notaryArgs = ["notarytool", "submit", pkgOutputPath, "--wait"]
-                        if credentialType == .keychainProfile {
-                            notaryArgs.append(contentsOf: ["--keychain-profile", keychainProfile])
-                        } else {
-                            notaryArgs.append(contentsOf: ["--key-id", apiKeyId, "--issuer", apiIssuerId, "--key", apiKeyPath])
-                        }
+                    let submitStatus = try await ShellManager.shared.runStream(
+                        executable: "/usr/bin/xcrun",
+                        arguments: notaryArgs,
+                        processId: activeProcessId
+                    ) { [weak self] line in
+                        Task { @MainActor in self?.appendLog("  \(line)") }
+                    }
 
-                        let submitPkgStatus = try await ShellManager.shared.runStream(
+                    if submitStatus == 0 {
+                        appendLog("Stapling ticket to PKG...")
+                        _ = try await ShellManager.shared.runStream(
                             executable: "/usr/bin/xcrun",
-                            arguments: notaryArgs,
+                            arguments: ["stapler", "staple", pkgOutputPath],
                             processId: activeProcessId
                         ) { [weak self] line in
                             Task { @MainActor in self?.appendLog("  \(line)") }
                         }
-
-                        if submitPkgStatus == 0 {
-                            appendLog("Stapling ticket to PKG...")
-                            let stapleArgs = ["stapler", "staple", pkgOutputPath]
-                            let _ = try await ShellManager.shared.runStream(
-                                executable: "/usr/bin/xcrun",
-                                arguments: stapleArgs,
-                                processId: activeProcessId
-                            ) { [weak self] line in
-                                Task { @MainActor in self?.appendLog("  \(line)") }
-                            }
-                            appendLog("PKG package is now signed, notarized, and stapled.")
-                        } else {
-                            appendLog("Warning: PKG notarization failed.")
-                        }
                     } else {
-                        appendLog("Skipped: PKG notarization (distribution-only build)")
+                        appendLog("Warning: PKG notarization failed.")
                     }
                 } else {
-                    distributionBuildHadError = true
-                    appendLog("Error: productbuild failed with status \(status)")
+                    appendLog("Skipped: PKG notarization (distribution-only build)")
                 }
             } catch {
                 distributionBuildHadError = true
@@ -590,6 +547,378 @@ public class NotaryService: ObservableObject {
             currentStep = "Distribution Build Completed"
             appendLog("\n=== Distribution Build Completed ===")
         }
+    }
+
+    private func buildCustomizedInstaller(
+        appURL: URL,
+        workingTarget: String,
+        outputPath: String,
+        signingIdentity: String?,
+        settings: InstallerSettings,
+        assets: [DistributionAssetKind: URL]
+    ) async throws {
+        let fileManager = FileManager.default
+        let buildDirectory = fileManager.temporaryDirectory
+            .appendingPathComponent("pkg-build-\(UUID().uuidString)", isDirectory: true)
+        let resourcesDirectory = buildDirectory.appendingPathComponent("Resources", isDirectory: true)
+        let componentURL = buildDirectory.appendingPathComponent("component.pkg")
+        let distributionURL = buildDirectory.appendingPathComponent("Distribution.xml")
+        defer { try? fileManager.removeItem(at: buildDirectory) }
+
+        try fileManager.createDirectory(at: resourcesDirectory, withIntermediateDirectories: true)
+
+        let bundle = Bundle(url: appURL)
+        let bundleIdentifier = bundle?.bundleIdentifier ?? "com.dinkisstyle.\(slug(appURL.deletingPathExtension().lastPathComponent))"
+        let identifier = settings.identifier.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? bundleIdentifier + ".installer"
+            : settings.identifier.trimmingCharacters(in: .whitespacesAndNewlines)
+        let version = settings.version.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? (bundle?.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0")
+            : settings.version.trimmingCharacters(in: .whitespacesAndNewlines)
+        let title = settings.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? appURL.deletingPathExtension().lastPathComponent
+            : settings.title
+
+        appendLog("Creating component package...")
+        let componentStatus = try await ShellManager.shared.runStream(
+            executable: "/usr/bin/pkgbuild",
+            arguments: [
+                "--component", workingTarget,
+                "--install-location", "/Applications",
+                "--identifier", identifier,
+                "--version", version,
+                componentURL.path
+            ],
+            processId: activeProcessId
+        ) { [weak self] line in
+            Task { @MainActor in self?.appendLog("  \(line)") }
+        }
+        guard componentStatus == 0 else {
+            throw DistributionBuildError.commandFailed("pkgbuild", componentStatus)
+        }
+
+        var presentationElements: [String] = []
+        if settings.showWelcome {
+            try installerHTML(settings.welcomeText, title: title).write(
+                to: resourcesDirectory.appendingPathComponent("welcome.html"),
+                atomically: true,
+                encoding: .utf8
+            )
+            presentationElements.append(#"<welcome file="welcome.html"/>"#)
+        }
+        if settings.showReadMe {
+            try installerHTML(settings.readMeText, title: "Read Me").write(
+                to: resourcesDirectory.appendingPathComponent("readme.html"),
+                atomically: true,
+                encoding: .utf8
+            )
+            presentationElements.append(#"<readme file="readme.html"/>"#)
+        }
+        if settings.showLicense {
+            try settings.licenseText.write(
+                to: resourcesDirectory.appendingPathComponent("license.txt"),
+                atomically: true,
+                encoding: .utf8
+            )
+            presentationElements.append(#"<license file="license.txt"/>"#)
+        }
+        if settings.showConclusion {
+            try installerHTML(settings.conclusionText, title: "Installation Complete").write(
+                to: resourcesDirectory.appendingPathComponent("conclusion.html"),
+                atomically: true,
+                encoding: .utf8
+            )
+            presentationElements.append(#"<conclusion file="conclusion.html"/>"#)
+        }
+
+        if let backgroundURL = assets[.pkgBackground] {
+            let fileName = "installer-background.\(backgroundURL.pathExtension.lowercased())"
+            try fileManager.copyItem(at: backgroundURL, to: resourcesDirectory.appendingPathComponent(fileName))
+            presentationElements.append(
+                #"<background file="\#(xmlEscaped(fileName))" alignment="\#(settings.backgroundAlignment.rawValue)" scaling="\#(settings.backgroundScaling.rawValue)"/>"#
+            )
+        }
+
+        let distribution = """
+        <?xml version="1.0" encoding="utf-8"?>
+        <installer-gui-script minSpecVersion="2">
+            <title>\(xmlEscaped(title))</title>
+            <options customize="never" require-scripts="false" rootVolumeOnly="true"/>
+            <domains enable_anywhere="false" enable_currentUserHome="false" enable_localSystem="true"/>
+            \(presentationElements.joined(separator: "\n    "))
+            <choices-outline>
+                <line choice="default">
+                    <line choice="app"/>
+                </line>
+            </choices-outline>
+            <choice id="default"/>
+            <choice id="app" visible="false">
+                <pkg-ref id="\(xmlEscaped(identifier))"/>
+            </choice>
+            <pkg-ref id="\(xmlEscaped(identifier))" version="\(xmlEscaped(version))" onConclusion="\(settings.conclusionAction.distributionValue)">component.pkg</pkg-ref>
+        </installer-gui-script>
+        """
+        try distribution.write(to: distributionURL, atomically: true, encoding: .utf8)
+
+        if fileManager.fileExists(atPath: outputPath) {
+            try fileManager.removeItem(atPath: outputPath)
+        }
+
+        var productArguments = [
+            "--distribution", distributionURL.path,
+            "--package-path", buildDirectory.path,
+            "--resources", resourcesDirectory.path
+        ]
+        if let signingIdentity, !signingIdentity.isEmpty {
+            productArguments.append(contentsOf: ["--sign", signingIdentity, "--timestamp"])
+        }
+        productArguments.append(outputPath)
+
+        appendLog("Building product archive with custom Installer presentation...")
+        let productStatus = try await ShellManager.shared.runStream(
+            executable: "/usr/bin/productbuild",
+            arguments: productArguments,
+            processId: activeProcessId
+        ) { [weak self] line in
+            Task { @MainActor in self?.appendLog("  \(line)") }
+        }
+        guard productStatus == 0 else {
+            throw DistributionBuildError.commandFailed("productbuild", productStatus)
+        }
+    }
+
+    private func buildCustomizedDiskImage(
+        appURL: URL,
+        workingTarget: String,
+        outputPath: String,
+        settings: DiskImageSettings,
+        assets: [DistributionAssetKind: URL]
+    ) async throws {
+        let fileManager = FileManager.default
+        let buildDirectory = fileManager.temporaryDirectory
+            .appendingPathComponent("dmg-build-\(UUID().uuidString)", isDirectory: true)
+        let stagingDirectory = buildDirectory.appendingPathComponent("staging", isDirectory: true)
+        let mountDirectory = buildDirectory.appendingPathComponent("mounted", isDirectory: true)
+        let readWriteImage = buildDirectory.appendingPathComponent("layout.dmg")
+        defer { try? fileManager.removeItem(at: buildDirectory) }
+
+        try fileManager.createDirectory(at: stagingDirectory, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: mountDirectory, withIntermediateDirectories: true)
+
+        let stagedAppURL = stagingDirectory.appendingPathComponent(appURL.lastPathComponent)
+        appendLog("Staging app bundle and disk image assets...")
+        let copyStatus = try await ShellManager.shared.runStream(
+            executable: "/usr/bin/ditto",
+            arguments: [workingTarget, stagedAppURL.path],
+            processId: activeProcessId
+        ) { [weak self] line in
+            Task { @MainActor in self?.appendLog("  \(line)") }
+        }
+        guard copyStatus == 0 else {
+            throw DistributionBuildError.commandFailed("ditto", copyStatus)
+        }
+
+        if settings.includeApplicationsLink {
+            try fileManager.createSymbolicLink(
+                at: stagingDirectory.appendingPathComponent("Applications"),
+                withDestinationURL: URL(fileURLWithPath: "/Applications", isDirectory: true)
+            )
+        }
+
+        var backgroundFileName = ""
+        if let backgroundURL = assets[.dmgBackground] {
+            let backgroundDirectory = stagingDirectory.appendingPathComponent(".background", isDirectory: true)
+            try fileManager.createDirectory(at: backgroundDirectory, withIntermediateDirectories: true)
+            backgroundFileName = "background.\(backgroundURL.pathExtension.lowercased())"
+            try fileManager.copyItem(at: backgroundURL, to: backgroundDirectory.appendingPathComponent(backgroundFileName))
+        }
+
+        let hasVolumeIcon = assets[.dmgVolumeIcon] != nil
+        if let volumeIconURL = assets[.dmgVolumeIcon] {
+            try fileManager.copyItem(at: volumeIconURL, to: stagingDirectory.appendingPathComponent(".VolumeIcon.icns"))
+        }
+
+        let volumeName = settings.volumeName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? appURL.deletingPathExtension().lastPathComponent
+            : settings.volumeName
+
+        appendLog("Creating writable disk image...")
+        let createStatus = try await ShellManager.shared.runStream(
+            executable: "/usr/bin/hdiutil",
+            arguments: [
+                "create", "-srcfolder", stagingDirectory.path,
+                "-volname", volumeName,
+                "-fs", "HFS+", "-format", "UDRW", "-ov", readWriteImage.path
+            ],
+            processId: activeProcessId
+        ) { [weak self] line in
+            Task { @MainActor in self?.appendLog("  \(line)") }
+        }
+        guard createStatus == 0 else {
+            throw DistributionBuildError.commandFailed("hdiutil create", createStatus)
+        }
+
+        let attachStatus = try await ShellManager.shared.runStream(
+            executable: "/usr/bin/hdiutil",
+            arguments: ["attach", "-readwrite", "-noverify", "-noautoopen", "-mountpoint", mountDirectory.path, readWriteImage.path],
+            processId: activeProcessId
+        ) { [weak self] line in
+            Task { @MainActor in self?.appendLog("  \(line)") }
+        }
+        guard attachStatus == 0 else {
+            throw DistributionBuildError.commandFailed("hdiutil attach", attachStatus)
+        }
+
+        var layoutError: Error?
+        do {
+            if hasVolumeIcon {
+                let setFileStatus = try await ShellManager.shared.runStream(
+                    executable: "/usr/bin/xcrun",
+                    arguments: ["SetFile", "-a", "C", mountDirectory.path],
+                    processId: activeProcessId
+                ) { _ in }
+                if setFileStatus != 0 {
+                    appendLog("Warning: The volume icon was copied, but its custom-icon Finder flag could not be set.")
+                }
+            }
+
+            let width = min(max(settings.windowWidth, 420), 1600)
+            let height = min(max(settings.windowHeight, 260), 1000)
+            let iconSize = min(max(settings.iconSize, 32), 256)
+            let appX = settings.centerAppIcon ? width / 2 : min(max(settings.appIconX, 40), width - 40)
+            let appY = settings.centerAppIcon ? height / 2 : min(max(settings.appIconY, 70), height - 40)
+            let applicationsX = min(max(settings.applicationsIconX, 40), width - 40)
+            let applicationsY = min(max(settings.applicationsIconY, 70), height - 40)
+
+            let scriptURL = buildDirectory.appendingPathComponent("layout.applescript")
+            try diskImageLayoutScript.write(to: scriptURL, atomically: true, encoding: .utf8)
+            appendLog("Applying Finder window layout...")
+            let layoutStatus = try await ShellManager.shared.runStream(
+                executable: "/usr/bin/osascript",
+                arguments: [
+                    scriptURL.path,
+                    mountDirectory.lastPathComponent,
+                    String(width), String(height), String(iconSize),
+                    appURL.lastPathComponent, String(appX), String(appY),
+                    settings.includeApplicationsLink ? "1" : "0",
+                    String(applicationsX), String(applicationsY),
+                    backgroundFileName
+                ],
+                processId: activeProcessId
+            ) { [weak self] line in
+                Task { @MainActor in self?.appendLog("  \(line)") }
+            }
+            if layoutStatus != 0 {
+                throw DistributionBuildError.commandFailed("osascript", layoutStatus)
+            }
+
+            _ = try ShellManager.shared.runSync(executable: "/bin/sync", arguments: [])
+        } catch {
+            layoutError = error
+        }
+
+        let detachStatus = try await ShellManager.shared.runStream(
+            executable: "/usr/bin/hdiutil",
+            arguments: ["detach", mountDirectory.path],
+            processId: activeProcessId
+        ) { [weak self] line in
+            Task { @MainActor in self?.appendLog("  \(line)") }
+        }
+        if let layoutError { throw layoutError }
+        guard detachStatus == 0 else {
+            throw DistributionBuildError.commandFailed("hdiutil detach", detachStatus)
+        }
+
+        if fileManager.fileExists(atPath: outputPath) {
+            try fileManager.removeItem(atPath: outputPath)
+        }
+        appendLog("Compressing final disk image...")
+        let convertStatus = try await ShellManager.shared.runStream(
+            executable: "/usr/bin/hdiutil",
+            arguments: ["convert", readWriteImage.path, "-format", "UDZO", "-imagekey", "zlib-level=9", "-o", outputPath],
+            processId: activeProcessId
+        ) { [weak self] line in
+            Task { @MainActor in self?.appendLog("  \(line)") }
+        }
+        guard convertStatus == 0 else {
+            throw DistributionBuildError.commandFailed("hdiutil convert", convertStatus)
+        }
+    }
+
+    private var diskImageLayoutScript: String {
+        """
+        on run argv
+            set mountedDiskName to item 1 of argv
+            set windowWidth to (item 2 of argv) as integer
+            set windowHeight to (item 3 of argv) as integer
+            set requestedIconSize to (item 4 of argv) as integer
+            set appName to item 5 of argv
+            set appX to (item 6 of argv) as integer
+            set appY to (item 7 of argv) as integer
+            set hasApplicationsLink to item 8 of argv
+            set applicationsX to (item 9 of argv) as integer
+            set applicationsY to (item 10 of argv) as integer
+            set backgroundName to item 11 of argv
+
+            tell application "Finder"
+                tell disk mountedDiskName
+                    open
+                    tell container window
+                        set current view to icon view
+                        set toolbar visible to false
+                        set statusbar visible to false
+                        set pathbar visible to false
+                        set bounds to {100, 100, 100 + windowWidth, 100 + windowHeight}
+                    end tell
+                    tell icon view options of container window
+                        set arrangement to not arranged
+                        set icon size to requestedIconSize
+                        set text size to 12
+                        if backgroundName is not "" then
+                            set background picture to file (".background:" & backgroundName)
+                        end if
+                    end tell
+                    set position of item appName to {appX, appY}
+                    if hasApplicationsLink is "1" then
+                        set position of item "Applications" to {applicationsX, applicationsY}
+                    end if
+                    update without registering applications
+                    delay 1
+                    close container window
+                    open
+                    delay 1
+                end tell
+            end tell
+        end run
+        """
+    }
+
+    private func installerHTML(_ text: String, title: String) -> String {
+        let body = htmlEscaped(text).replacingOccurrences(of: "\n", with: "<br>")
+        return """
+        <!doctype html><html><head><meta charset="utf-8">
+        <style>body { font: -apple-system-body; margin: 22px; line-height: 1.45; } h2 { font: -apple-system-title2; }</style>
+        </head><body><h2>\(htmlEscaped(title))</h2><p>\(body)</p></body></html>
+        """
+    }
+
+    private func xmlEscaped(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+            .replacingOccurrences(of: "'", with: "&apos;")
+    }
+
+    private func htmlEscaped(_ value: String) -> String {
+        xmlEscaped(value)
+    }
+
+    private func slug(_ value: String) -> String {
+        let allowed = CharacterSet.alphanumerics
+        return value.lowercased().unicodeScalars.map { allowed.contains($0) ? Character(String($0)) : "-" }
+            .reduce(into: "") { $0.append($1) }
     }
     
     /// Runs verification tools to populate checklist status.

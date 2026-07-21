@@ -8,9 +8,10 @@ BINARY_NAME="DKST-macOS-Notary"
 BUNDLE_ID="com.dinkisstyle.notarytool"
 BUILD_DIR="build"
 APP_BUNDLE="$BUILD_DIR/$APP_NAME.app"
+ICON_FILE="AppIcon"
 
 echo "=== 1. Building executable target ==="
-swift build -c release
+swift build -c release --disable-sandbox -debug-info-format none
 
 echo "=== 2. Creating App Bundle Structure ==="
 rm -rf "$APP_BUNDLE"
@@ -35,9 +36,18 @@ if [ -f "Sources/Resources/Appicon.png" ]; then
     sips -z 256 256   "Sources/Resources/Appicon.png" --out "$ICONSET_DIR/icon_256x256.png" >/dev/null 2>&1
     sips -z 512 512   "Sources/Resources/Appicon.png" --out "$ICONSET_DIR/icon_256x256@2x.png" >/dev/null 2>&1
     sips -z 512 512   "Sources/Resources/Appicon.png" --out "$ICONSET_DIR/icon_512x512.png" >/dev/null 2>&1
-    sips -z 1024 1024 "Sources/Resources/Appicon.png" --out "$ICONSET_DIR/icon_512x512@2x.png" >/dev/null 2>&1
+    # Force a resample so a 16-bit 1024px source becomes the 8-bit PNG that
+    # iconutil expects for the largest iconset member.
+    sips -z 1023 1023 "Sources/Resources/Appicon.png" --out "$ICONSET_DIR/.icon_1023.png" >/dev/null 2>&1
+    sips -z 1024 1024 "$ICONSET_DIR/.icon_1023.png" --out "$ICONSET_DIR/icon_512x512@2x.png" >/dev/null 2>&1
+    rm -f "$ICONSET_DIR/.icon_1023.png"
+    xattr -cr "$ICONSET_DIR"
     
-    iconutil -c icns "$ICONSET_DIR" -o "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
+    if ! iconutil -c icns "$ICONSET_DIR" -o "$APP_BUNDLE/Contents/Resources/AppIcon.icns"; then
+        echo "iconutil rejected the iconset; using the source PNG as the bundle icon."
+        cp "Sources/Resources/Appicon.png" "$APP_BUNDLE/Contents/Resources/AppIcon.png"
+        ICON_FILE="AppIcon.png"
+    fi
     rm -rf "$ICONSET_DIR"
 fi
 
@@ -66,7 +76,7 @@ cat <<EOF > "$APP_BUNDLE/Contents/Info.plist"
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>CFBundleIconFile</key>
-    <string>AppIcon</string>
+    <string>$ICON_FILE</string>
 </dict>
 </plist>
 EOF

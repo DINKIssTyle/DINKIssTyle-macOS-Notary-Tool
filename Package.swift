@@ -16,6 +16,11 @@ let package = Package(
             dependencies: [],
             path: "Sources",
             exclude: ["Resources"]
+        ),
+        .testTarget(
+            name: "DKST-macOS-NotaryTests",
+            dependencies: ["DKST-macOS-Notary"],
+            path: "Tests"
         )
     ]
 )

@@ -12,11 +12,15 @@ struct NotaryView: View {
     @State private var signAppBundle: Bool = false
     @State private var selectedAppIdentity: String = ""
     
-    @State private var packageToPkg: Bool = false
-    @State private var signPkgBundle: Bool = false
-    @State private var selectedPkgIdentity: String = ""
-    @State private var packageToDmg: Bool = false
-    @State private var packageToZip: Bool = false
+    @State private var distributionProject = DistributionProject()
+    @State private var distributionAssets: [DistributionAssetKind: URL] = [:]
+    @State private var extractedProjectDirectory: URL?
+    @State private var projectSaveTask: Task<Void, Never>?
+    @State private var projectIsReady = false
+    @State private var hasProjectArchive = false
+    @State private var projectStatus = ""
+    @State private var pkgOptionsExpanded = true
+    @State private var dmgOptionsExpanded = true
     
     // Credentials selection
     @State private var credentialType: CredentialType = .keychainProfile
@@ -69,10 +73,10 @@ struct NotaryView: View {
             service.fetchCertificates()
         }
         .onChange(of: selectedFile) { file in
-            resetWorkflowState()
-            if let file = file {
-                checkIfAlreadySigned(path: file.path)
-            }
+            loadWorkflow(for: file)
+        }
+        .onChange(of: distributionProject) { _ in
+            scheduleProjectSave()
         }
     }
     
@@ -220,19 +224,37 @@ struct NotaryView: View {
         let isApp = fileType == "app"
         
         return VStack(alignment: .leading, spacing: 12) {
-            Text("Distribution Formats")
-                .font(.caption)
-                .fontWeight(.bold)
-                .foregroundStyle(.secondary)
+            HStack {
+                Text("Distribution Formats")
+                    .font(.caption)
+                    .fontWeight(.bold)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                if !projectStatus.isEmpty {
+                    Label(projectStatus, systemImage: hasProjectArchive ? "checkmark.circle" : "exclamationmark.triangle")
+                        .font(.system(size: 8))
+                        .foregroundStyle(hasProjectArchive ? Color.secondary : Color.orange)
+                        .lineLimit(1)
+                }
+            }
             
             // 1. PKG Option
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
-                    Label("Build Installer (.pkg)", systemImage: "shippingbox")
-                        .font(.system(size: 11, weight: .semibold))
+                    Button {
+                        if packageToPkg { withAnimation { pkgOptionsExpanded.toggle() } }
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: packageToPkg && pkgOptionsExpanded ? "chevron.down" : "chevron.right")
+                                .font(.system(size: 8, weight: .bold))
+                            Label("Build Installer (.pkg)", systemImage: "shippingbox")
+                                .font(.system(size: 11, weight: .semibold))
+                        }
+                    }
+                    .buttonStyle(.plain)
                     Spacer()
                     if isApp {
-                        Toggle("", isOn: $packageToPkg)
+                        Toggle("", isOn: $distributionProject.buildInstaller)
                             .toggleStyle(.switch)
                             .labelsHidden()
                             .controlSize(.small)
@@ -243,9 +265,9 @@ struct NotaryView: View {
                     }
                 }
                 
-                if isApp && packageToPkg {
+                if isApp && packageToPkg && pkgOptionsExpanded {
                     VStack(alignment: .leading, spacing: 10) {
-                        Toggle("Sign Installer Package", isOn: $signPkgBundle)
+                        Toggle("Sign Installer Package", isOn: $distributionProject.signInstaller)
                             .font(.system(size: 10))
                         
                         if signPkgBundle {
@@ -259,7 +281,7 @@ struct NotaryView: View {
                                         .font(.system(size: 9))
                                         .foregroundStyle(.red)
                                 } else {
-                                    Picker("", selection: $selectedPkgIdentity) {
+                                    Picker("", selection: $distributionProject.installerIdentity) {
                                         Text("Select certificate...").tag("")
                                         ForEach(service.installerIdentities, id: \.self) { cert in
                                             Text(cert).tag(cert)
@@ -271,6 +293,14 @@ struct NotaryView: View {
                                 }
                             }
                         }
+
+                        Divider()
+                        InstallerCustomizationView(
+                            settings: $distributionProject.installer,
+                            backgroundURL: distributionAssets[.pkgBackground],
+                            chooseBackground: { selectAsset(.pkgBackground) },
+                            removeBackground: { removeAsset(.pkgBackground) }
+                        )
                     }
                     .padding(.leading, 12)
                     .transition(.opacity)
@@ -280,19 +310,43 @@ struct NotaryView: View {
             Divider()
             
             // 2. DMG Option
-            HStack {
-                Label("Build Disk Image (.dmg)", systemImage: "externaldrive.fill")
-                    .font(.system(size: 11, weight: .semibold))
-                Spacer()
-                if isApp {
-                    Toggle("", isOn: $packageToDmg)
-                        .toggleStyle(.switch)
-                        .labelsHidden()
-                        .controlSize(.small)
-                } else {
-                    Text("N/A")
-                        .font(.system(size: 9))
-                        .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Button {
+                        if packageToDmg { withAnimation { dmgOptionsExpanded.toggle() } }
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: packageToDmg && dmgOptionsExpanded ? "chevron.down" : "chevron.right")
+                                .font(.system(size: 8, weight: .bold))
+                            Label("Build Disk Image (.dmg)", systemImage: "externaldrive.fill")
+                                .font(.system(size: 11, weight: .semibold))
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    Spacer()
+                    if isApp {
+                        Toggle("", isOn: $distributionProject.buildDiskImage)
+                            .toggleStyle(.switch)
+                            .labelsHidden()
+                            .controlSize(.small)
+                    } else {
+                        Text("N/A")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                if isApp && packageToDmg && dmgOptionsExpanded {
+                    DiskImageCustomizationView(
+                        settings: $distributionProject.diskImage,
+                        backgroundURL: distributionAssets[.dmgBackground],
+                        volumeIconURL: distributionAssets[.dmgVolumeIcon],
+                        chooseBackground: { selectAsset(.dmgBackground) },
+                        removeBackground: { removeAsset(.dmgBackground) },
+                        chooseVolumeIcon: { selectAsset(.dmgVolumeIcon) },
+                        removeVolumeIcon: { removeAsset(.dmgVolumeIcon) }
+                    )
+                    .transition(.opacity)
                 }
             }
             
@@ -304,7 +358,7 @@ struct NotaryView: View {
                     .font(.system(size: 11, weight: .semibold))
                 Spacer()
                 if isApp {
-                    Toggle("", isOn: $packageToZip)
+                    Toggle("", isOn: $distributionProject.buildZipArchive)
                         .toggleStyle(.switch)
                         .labelsHidden()
                         .controlSize(.small)
@@ -537,6 +591,12 @@ struct NotaryView: View {
     }
     
     // MARK: - Helpers
+
+    private var packageToPkg: Bool { distributionProject.buildInstaller }
+    private var signPkgBundle: Bool { distributionProject.signInstaller }
+    private var selectedPkgIdentity: String { distributionProject.installerIdentity }
+    private var packageToDmg: Bool { distributionProject.buildDiskImage }
+    private var packageToZip: Bool { distributionProject.buildZipArchive }
     
     private func statusIcon(for status: VerificationStatus) -> some View {
         switch status {
@@ -646,11 +706,132 @@ struct NotaryView: View {
     private func resetWorkflowState() {
         service.clearLogs()
         signAppBundle = false
-        packageToPkg = false
-        signPkgBundle = false
-        packageToDmg = false
-        packageToZip = false
         isAlreadySigned = false
+    }
+
+    private func loadWorkflow(for file: URL?) {
+        projectSaveTask?.cancel()
+        projectIsReady = false
+        resetWorkflowState()
+        distributionAssets = [:]
+        hasProjectArchive = false
+        projectStatus = ""
+
+        if let extractedProjectDirectory {
+            try? FileManager.default.removeItem(at: extractedProjectDirectory)
+            self.extractedProjectDirectory = nil
+        }
+
+        guard let file else {
+            distributionProject = DistributionProject()
+            return
+        }
+
+        checkIfAlreadySigned(path: file.path)
+        guard file.pathExtension.lowercased() == "app" else {
+            distributionProject = DistributionProject()
+            return
+        }
+
+        do {
+            if let loaded = try DistributionProjectArchive.load(for: file) {
+                distributionProject = loaded.project
+                distributionAssets = loaded.assets
+                extractedProjectDirectory = loaded.extractionDirectory
+                hasProjectArchive = true
+                projectStatus = "Loaded \(DistributionProjectArchive.archiveURL(for: file).lastPathComponent)"
+            } else {
+                distributionProject = defaultProject(for: file)
+            }
+        } catch {
+            distributionProject = defaultProject(for: file)
+            projectStatus = "Could not load .dnt"
+            service.appendLog("Project load error: \(error.localizedDescription)")
+        }
+
+        DispatchQueue.main.async {
+            projectIsReady = true
+        }
+    }
+
+    private func defaultProject(for appURL: URL) -> DistributionProject {
+        var project = DistributionProject()
+        let appName = appURL.deletingPathExtension().lastPathComponent
+        let bundle = Bundle(url: appURL)
+        project.installer.title = appName
+        project.installer.identifier = (bundle?.bundleIdentifier ?? "") + (bundle?.bundleIdentifier == nil ? "" : ".installer")
+        project.installer.version = bundle?.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
+        project.installer.welcomeText = "Welcome to the \(appName) installer."
+        project.installer.conclusionText = "\(appName) was installed successfully."
+        project.diskImage.volumeName = appName
+        return project
+    }
+
+    private func scheduleProjectSave() {
+        guard projectIsReady,
+              let appURL = selectedFile,
+              appURL.pathExtension.lowercased() == "app",
+              hasProjectArchive || packageToPkg || packageToDmg || packageToZip || !distributionAssets.isEmpty else { return }
+
+        projectSaveTask?.cancel()
+        projectSaveTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 450_000_000)
+            guard !Task.isCancelled else { return }
+            saveDistributionProject(for: appURL)
+        }
+    }
+
+    private func saveDistributionProject(for appURL: URL) {
+        do {
+            let url = try DistributionProjectArchive.save(
+                distributionProject,
+                for: appURL,
+                assetSources: distributionAssets
+            )
+            hasProjectArchive = true
+            projectStatus = "Saved \(url.lastPathComponent)"
+        } catch {
+            projectStatus = "Project save failed"
+            service.appendLog("Project save error: \(error.localizedDescription)")
+        }
+    }
+
+    private func selectAsset(_ kind: DistributionAssetKind) {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        switch kind {
+        case .dmgVolumeIcon:
+            panel.allowedContentTypes = [UTType(filenameExtension: "icns")].compactMap { $0 }
+        case .pkgBackground, .dmgBackground:
+            panel.allowedContentTypes = [.png, .jpeg, .tiff]
+        }
+
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        distributionAssets[kind] = url
+        switch kind {
+        case .pkgBackground:
+            distributionProject.installer.backgroundAssetName = url.lastPathComponent
+        case .dmgBackground:
+            distributionProject.diskImage.backgroundAssetName = url.lastPathComponent
+        case .dmgVolumeIcon:
+            distributionProject.diskImage.volumeIconAssetName = url.lastPathComponent
+        }
+        scheduleProjectSave()
+    }
+
+    private func removeAsset(_ kind: DistributionAssetKind) {
+        distributionAssets[kind] = nil
+        switch kind {
+        case .pkgBackground:
+            distributionProject.installer.backgroundAssetName = nil
+        case .dmgBackground:
+            distributionProject.diskImage.backgroundAssetName = nil
+        case .dmgVolumeIcon:
+            distributionProject.diskImage.volumeIconAssetName = nil
+        }
+        scheduleProjectSave()
     }
     
     private func checkIfAlreadySigned(path: String) {
@@ -710,6 +891,11 @@ struct NotaryView: View {
     
     private func startExecution() {
         guard let file = selectedFile else { return }
+
+        if file.pathExtension.lowercased() == "app", packageToPkg || packageToDmg || packageToZip {
+            projectSaveTask?.cancel()
+            saveDistributionProject(for: file)
+        }
         
         Task {
             await service.startWorkflow(
@@ -719,6 +905,8 @@ struct NotaryView: View {
                 signPkgIdentity: (packageToPkg && signPkgBundle) ? selectedPkgIdentity : nil,
                 packageToDmg: packageToDmg,
                 packageToZip: packageToZip,
+                distributionProject: distributionProject,
+                distributionAssets: distributionAssets,
                 performNotarization: shouldPerformNotarization,
                 credentialType: credentialType,
                 keychainProfile: selectedProfile,

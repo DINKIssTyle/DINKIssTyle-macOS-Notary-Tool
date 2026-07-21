@@ -47,20 +47,33 @@ public class ShellManager: @unchecked Sendable {
         
         let fileHandle = pipe.fileHandleForReading
         
-        // Read lines asynchronously
-        do {
-            for try await line in fileHandle.bytes.lines {
-                onOutput(line)
-            }
-        } catch {
-            // Process reading might error if closed abruptly, ignore if process was cancelled
-            if process.isRunning {
-                onOutput("Error reading output stream: \(error.localizedDescription)")
+        // Read output concurrently. Some macOS tools (notably hdiutil) launch a
+        // helper that inherits stdout, so waiting for pipe EOF before observing
+        // the parent process can hang indefinitely.
+        let readerTask = Task {
+            do {
+                for try await line in fileHandle.bytes.lines {
+                    onOutput(line)
+                }
+            } catch {
+                if process.isRunning {
+                    onOutput("Error reading output stream: \(error.localizedDescription)")
+                }
             }
         }
-        
-        process.waitUntilExit()
-        return process.terminationStatus
+
+        let status = await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                process.waitUntilExit()
+                continuation.resume(returning: process.terminationStatus)
+            }
+        }
+
+        // Force the reader to finish even when a detached helper retained the
+        // write side of the pipe. Output emitted by the parent is already read.
+        try? fileHandle.close()
+        _ = await readerTask.result
+        return status
     }
     
     /// Runs a shell command through zsh and streams the output.
