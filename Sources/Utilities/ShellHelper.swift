@@ -1,5 +1,33 @@
 import Foundation
 
+private final class StreamingOutputBuffer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var pendingData = Data()
+
+    func append(_ data: Data) -> [String] {
+        lock.lock()
+        defer { lock.unlock() }
+
+        pendingData.append(data)
+        var completeLines: [String] = []
+        while let newlineIndex = pendingData.firstIndex(of: 0x0A) {
+            var lineData = Data(pendingData[..<newlineIndex])
+            pendingData.removeSubrange(...newlineIndex)
+            if lineData.last == 0x0D { lineData.removeLast() }
+            completeLines.append(String(decoding: lineData, as: UTF8.self))
+        }
+        return completeLines
+    }
+
+    func flush() -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !pendingData.isEmpty else { return nil }
+        defer { pendingData.removeAll() }
+        return String(decoding: pendingData, as: UTF8.self)
+    }
+}
+
 public class ShellManager: @unchecked Sendable {
     public static let shared = ShellManager()
     private var activeProcesses: [UUID: Process] = [:]
@@ -47,19 +75,13 @@ public class ShellManager: @unchecked Sendable {
         
         let fileHandle = pipe.fileHandleForReading
         
-        // Read output concurrently. Some macOS tools (notably hdiutil) launch a
-        // helper that inherits stdout, so waiting for pipe EOF before observing
-        // the parent process can hang indefinitely.
-        let readerTask = Task {
-            do {
-                for try await line in fileHandle.bytes.lines {
-                    onOutput(line)
-                }
-            } catch {
-                if process.isRunning {
-                    onOutput("Error reading output stream: \(error.localizedDescription)")
-                }
-            }
+        // Read available chunks without waiting for EOF. Some macOS tools launch
+        // detached helpers that retain the pipe even after the command exits.
+        let outputBuffer = StreamingOutputBuffer()
+        fileHandle.readabilityHandler = { handle in
+            let data = handle.availableData
+            guard !data.isEmpty else { return }
+            outputBuffer.append(data).forEach(onOutput)
         }
 
         let status = await withCheckedContinuation { continuation in
@@ -69,10 +91,10 @@ public class ShellManager: @unchecked Sendable {
             }
         }
 
-        // Force the reader to finish even when a detached helper retained the
-        // write side of the pipe. Output emitted by the parent is already read.
-        try? fileHandle.close()
-        _ = await readerTask.result
+        fileHandle.readabilityHandler = nil
+        if let remainingOutput = outputBuffer.flush() {
+            onOutput(remainingOutput)
+        }
         return status
     }
     

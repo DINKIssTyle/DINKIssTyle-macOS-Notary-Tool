@@ -106,6 +106,7 @@ struct InstallerCustomizationView: View {
 
 struct DiskImageCustomizationView: View {
     @Binding var settings: DiskImageSettings
+    let canUseInstallerPackage: Bool
     let backgroundURL: URL?
     let volumeIconURL: URL?
     let chooseBackground: () -> Void
@@ -115,6 +116,14 @@ struct DiskImageCustomizationView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
+            if canUseInstallerPackage {
+                Toggle("Put Installer Package in DMG", isOn: $settings.includeInstallerPackage)
+                    .font(.system(size: 10, weight: .medium))
+                Text("Replaces the app bundle in the disk image with the completed .pkg installer.")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+            }
+
             labeledTextField("Volume Name", text: $settings.volumeName, prompt: "App name")
 
             HStack(spacing: 8) {
@@ -132,29 +141,31 @@ struct DiskImageCustomizationView: View {
             )
             AssetPickerRow(
                 title: "Mounted Volume Icon",
-                subtitle: "ICNS",
+                subtitle: "ICNS or PNG",
                 selectedURL: volumeIconURL,
                 choose: chooseVolumeIcon,
                 remove: removeVolumeIcon
             )
 
             Divider()
-            Toggle("Center App Icon", isOn: $settings.centerAppIcon)
+            Toggle(settings.includeInstallerPackage && canUseInstallerPackage ? "Center Installer Icon" : "Center App Icon", isOn: $settings.centerAppIcon)
                 .font(.system(size: 10, weight: .medium))
 
             if !settings.centerAppIcon {
                 HStack(spacing: 8) {
-                    integerField("App X", value: $settings.appIconX)
-                    integerField("App Y", value: $settings.appIconY)
+                    integerField(settings.includeInstallerPackage && canUseInstallerPackage ? "Installer X" : "App X", value: $settings.appIconX)
+                    integerField(settings.includeInstallerPackage && canUseInstallerPackage ? "Installer Y" : "App Y", value: $settings.appIconY)
                 }
             }
 
-            Toggle("Add Applications Shortcut", isOn: $settings.includeApplicationsLink)
-                .font(.system(size: 10, weight: .medium))
-            if settings.includeApplicationsLink {
-                HStack(spacing: 8) {
-                    integerField("Applications X", value: $settings.applicationsIconX)
-                    integerField("Applications Y", value: $settings.applicationsIconY)
+            if !(settings.includeInstallerPackage && canUseInstallerPackage) {
+                Toggle("Add Applications Shortcut", isOn: $settings.includeApplicationsLink)
+                    .font(.system(size: 10, weight: .medium))
+                if settings.includeApplicationsLink {
+                    HStack(spacing: 8) {
+                        integerField("Applications X", value: $settings.applicationsIconX)
+                        integerField("Applications Y", value: $settings.applicationsIconY)
+                    }
                 }
             }
 

@@ -68,7 +68,7 @@ struct MainView: View {
                     Text("v1.0.0")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
-                    Text("Local Notarization Flow")
+                    Text("© 2026 DINKI'ssTyle")
                         .font(.system(size: 9))
                         .foregroundStyle(.tertiary)
                 }

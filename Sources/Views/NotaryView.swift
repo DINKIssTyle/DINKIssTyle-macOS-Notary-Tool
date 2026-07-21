@@ -339,6 +339,7 @@ struct NotaryView: View {
                 if isApp && packageToDmg && dmgOptionsExpanded {
                     DiskImageCustomizationView(
                         settings: $distributionProject.diskImage,
+                        canUseInstallerPackage: packageToPkg,
                         backgroundURL: distributionAssets[.dmgBackground],
                         volumeIconURL: distributionAssets[.dmgVolumeIcon],
                         chooseBackground: { selectAsset(.dmgBackground) },
@@ -803,7 +804,7 @@ struct NotaryView: View {
         panel.canChooseFiles = true
         switch kind {
         case .dmgVolumeIcon:
-            panel.allowedContentTypes = [UTType(filenameExtension: "icns")].compactMap { $0 }
+            panel.allowedContentTypes = [UTType(filenameExtension: "icns"), .png].compactMap { $0 }
         case .pkgBackground, .dmgBackground:
             panel.allowedContentTypes = [.png, .jpeg, .tiff]
         }

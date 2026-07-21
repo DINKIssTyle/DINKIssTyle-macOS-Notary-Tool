@@ -1,8 +1,33 @@
+import AppKit
 import Foundation
 import XCTest
 @testable import DKST_macOS_Notary
 
 final class DistributionProjectTests: XCTestCase {
+    func testOlderDiskImageSettingsDefaultToAppBundlePayload() throws {
+        let settings = try JSONDecoder().decode(DiskImageSettings.self, from: Data("{}".utf8))
+        XCTAssertFalse(settings.includeInstallerPackage)
+        XCTAssertTrue(settings.includeApplicationsLink)
+    }
+
+    func testPNGCanBeConvertedToICNS() throws {
+        let fileManager = FileManager.default
+        let directory = fileManager.temporaryDirectory
+            .appendingPathComponent("icns-test-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fileManager.removeItem(at: directory) }
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+
+        let sourceURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("Sources/Resources/Appicon.png")
+        let outputURL = directory.appendingPathComponent("VolumeIcon.icns")
+        try ICNSConverter.convertPNG(at: sourceURL, to: outputURL)
+
+        let data = try Data(contentsOf: outputURL)
+        XCTAssertEqual(String(decoding: data.prefix(4), as: UTF8.self), "icns")
+        XCTAssertGreaterThan(data.count, 1_000)
+        XCTAssertNotNil(NSImage(contentsOf: outputURL))
+    }
+
     func testArchiveRoundTripIncludesAssets() throws {
         let fileManager = FileManager.default
         let directory = fileManager.temporaryDirectory
@@ -15,9 +40,11 @@ final class DistributionProjectTests: XCTestCase {
         try Data([0x89, 0x50, 0x4e, 0x47]).write(to: backgroundURL)
 
         var project = DistributionProject()
+        project.buildInstaller = true
         project.buildDiskImage = true
         project.diskImage.volumeName = "Test Volume"
         project.diskImage.windowWidth = 720
+        project.diskImage.includeInstallerPackage = true
         project.diskImage.backgroundAssetName = backgroundURL.lastPathComponent
 
         let archiveURL = try DistributionProjectArchive.save(
@@ -31,6 +58,7 @@ final class DistributionProjectTests: XCTestCase {
         defer { try? fileManager.removeItem(at: loaded.extractionDirectory) }
         XCTAssertEqual(loaded.project.diskImage.volumeName, "Test Volume")
         XCTAssertEqual(loaded.project.diskImage.windowWidth, 720)
+        XCTAssertTrue(loaded.project.diskImage.includeInstallerPackage)
         XCTAssertTrue(fileManager.fileExists(atPath: try XCTUnwrap(loaded.assets[.dmgBackground]).path))
     }
 
@@ -105,6 +133,7 @@ final class DistributionProjectTests: XCTestCase {
         let appURL = directory.appendingPathComponent("Test App.app", isDirectory: true)
         let contentsURL = appURL.appendingPathComponent("Contents", isDirectory: true)
         let macOSURL = contentsURL.appendingPathComponent("MacOS", isDirectory: true)
+        let backgroundURL = directory.appendingPathComponent("dmg-background.png")
         defer { try? fileManager.removeItem(at: directory) }
 
         try fileManager.createDirectory(at: macOSURL, withIntermediateDirectories: true)
@@ -121,24 +150,31 @@ final class DistributionProjectTests: XCTestCase {
         ]
         let plist = try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
         try plist.write(to: contentsURL.appendingPathComponent("Info.plist"))
+        let sourceImageURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("Sources/Resources/Appicon.png")
+        try Data(contentsOf: sourceImageURL).write(to: backgroundURL)
 
         var project = DistributionProject()
+        project.buildInstaller = true
         project.buildDiskImage = true
         project.diskImage.volumeName = "DKST DMG Test \(UUID().uuidString.prefix(6))"
         project.diskImage.windowWidth = 540
         project.diskImage.windowHeight = 340
         project.diskImage.centerAppIcon = true
+        project.diskImage.includeInstallerPackage = true
+        project.diskImage.backgroundAssetName = backgroundURL.lastPathComponent
+        project.diskImage.volumeIconAssetName = backgroundURL.lastPathComponent
 
         let service = NotaryService()
         await service.startWorkflow(
             fileUrl: appURL,
             signAppIdentity: nil,
-            packageToPkg: false,
+            packageToPkg: true,
             signPkgIdentity: nil,
             packageToDmg: true,
             packageToZip: false,
             distributionProject: project,
-            distributionAssets: [:],
+            distributionAssets: [.dmgBackground: backgroundURL, .dmgVolumeIcon: backgroundURL],
             performNotarization: false,
             credentialType: .keychainProfile,
             keychainProfile: "",
@@ -149,6 +185,8 @@ final class DistributionProjectTests: XCTestCase {
 
         let imageURL = directory.appendingPathComponent("Test App.dmg")
         XCTAssertTrue(fileManager.fileExists(atPath: imageURL.path), service.logOutput)
+        XCTAssertTrue(fileManager.fileExists(atPath: directory.appendingPathComponent("Test App.pkg").path), service.logOutput)
+        XCTAssertTrue(service.logOutput.contains("DMG payload: completed installer package"), service.logOutput)
         XCTAssertEqual(service.currentStep, "Distribution Build Completed", service.logOutput)
     }
 }

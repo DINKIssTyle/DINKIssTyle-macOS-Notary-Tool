@@ -94,6 +94,7 @@ public struct DiskImageSettings: Codable, Equatable, Sendable {
     public var windowHeight = 400
     public var iconSize = 96
 
+    public var includeInstallerPackage = false
     public var centerAppIcon = false
     public var appIconX = 180
     public var appIconY = 190
@@ -105,6 +106,31 @@ public struct DiskImageSettings: Codable, Equatable, Sendable {
     public var volumeIconAssetName: String?
 
     public init() {}
+
+    private enum CodingKeys: String, CodingKey {
+        case volumeName, windowWidth, windowHeight, iconSize
+        case includeInstallerPackage, centerAppIcon, appIconX, appIconY
+        case includeApplicationsLink, applicationsIconX, applicationsIconY
+        case backgroundAssetName, volumeIconAssetName
+    }
+
+    public init(from decoder: Decoder) throws {
+        self.init()
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        volumeName = try values.decodeIfPresent(String.self, forKey: .volumeName) ?? volumeName
+        windowWidth = try values.decodeIfPresent(Int.self, forKey: .windowWidth) ?? windowWidth
+        windowHeight = try values.decodeIfPresent(Int.self, forKey: .windowHeight) ?? windowHeight
+        iconSize = try values.decodeIfPresent(Int.self, forKey: .iconSize) ?? iconSize
+        includeInstallerPackage = try values.decodeIfPresent(Bool.self, forKey: .includeInstallerPackage) ?? false
+        centerAppIcon = try values.decodeIfPresent(Bool.self, forKey: .centerAppIcon) ?? centerAppIcon
+        appIconX = try values.decodeIfPresent(Int.self, forKey: .appIconX) ?? appIconX
+        appIconY = try values.decodeIfPresent(Int.self, forKey: .appIconY) ?? appIconY
+        includeApplicationsLink = try values.decodeIfPresent(Bool.self, forKey: .includeApplicationsLink) ?? includeApplicationsLink
+        applicationsIconX = try values.decodeIfPresent(Int.self, forKey: .applicationsIconX) ?? applicationsIconX
+        applicationsIconY = try values.decodeIfPresent(Int.self, forKey: .applicationsIconY) ?? applicationsIconY
+        backgroundAssetName = try values.decodeIfPresent(String.self, forKey: .backgroundAssetName)
+        volumeIconAssetName = try values.decodeIfPresent(String.self, forKey: .volumeIconAssetName)
+    }
 }
 
 public struct DistributionProject: Codable, Equatable, Sendable {

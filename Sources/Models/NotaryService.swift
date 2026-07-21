@@ -4,11 +4,14 @@ import Security
 
 private enum DistributionBuildError: LocalizedError {
     case commandFailed(String, Int32)
+    case installerPackageUnavailable
 
     var errorDescription: String? {
         switch self {
         case let .commandFailed(command, status):
             return "\(command) failed with status \(status)."
+        case .installerPackageUnavailable:
+            return "The installer package could not be built, so it cannot be added to the disk image."
         }
     }
 }
@@ -344,19 +347,96 @@ public class NotaryService: ObservableObject {
             }
         }
         
-        // 3b. Build Disk Image (.dmg)
+        let pkgOutputPath = parentDir.appendingPathComponent("\(appName).pkg").path
+        var pkgBuildSucceeded = false
+
+        // 3b. Build Installer Package first so a completed PKG can be embedded in the DMG.
+        if fileExtension == "app" && packageToPkg {
+            currentStep = "Building Package (.pkg)..."
+            progress = 0.6
+            appendLog("\n--- 3b. Building Installer Package (.pkg) ---")
+
+            do {
+                try await buildCustomizedInstaller(
+                    appURL: fileUrl,
+                    workingTarget: workingTarget,
+                    outputPath: pkgOutputPath,
+                    signingIdentity: signPkgIdentity,
+                    settings: distributionProject.installer,
+                    assets: distributionAssets
+                )
+                pkgBuildSucceeded = true
+                appendLog("Package created at: \(pkgOutputPath)")
+
+                if !packageToDmg {
+                    workingTarget = pkgOutputPath
+                }
+
+                if performNotarization {
+                    appendLog("Notarizing PKG...")
+                    var notaryArgs = ["notarytool", "submit", pkgOutputPath, "--wait"]
+                    if credentialType == .keychainProfile {
+                        notaryArgs.append(contentsOf: ["--keychain-profile", keychainProfile])
+                    } else {
+                        notaryArgs.append(contentsOf: ["--key-id", apiKeyId, "--issuer", apiIssuerId, "--key", apiKeyPath])
+                    }
+
+                    let submitStatus = try await ShellManager.shared.runStream(
+                        executable: "/usr/bin/xcrun",
+                        arguments: notaryArgs,
+                        processId: activeProcessId
+                    ) { [weak self] line in
+                        Task { @MainActor in self?.appendLog("  \(line)") }
+                    }
+
+                    if submitStatus == 0 {
+                        appendLog("Stapling ticket to PKG...")
+                        _ = try await ShellManager.shared.runStream(
+                            executable: "/usr/bin/xcrun",
+                            arguments: ["stapler", "staple", pkgOutputPath],
+                            processId: activeProcessId
+                        ) { [weak self] line in
+                            Task { @MainActor in self?.appendLog("  \(line)") }
+                        }
+                    } else {
+                        appendLog("Warning: PKG notarization failed.")
+                    }
+                } else {
+                    appendLog("Skipped: PKG notarization (distribution-only build)")
+                }
+            } catch {
+                distributionBuildHadError = true
+                appendLog("Packaging execution error: \(error.localizedDescription)")
+            }
+        }
+
+        // 3c. Build Disk Image (.dmg)
         if fileExtension == "app" && packageToDmg {
             currentStep = "Building Disk Image..."
             progress = 0.6
             let dmgOutputPath = parentDir.appendingPathComponent("\(appName).dmg").path
-            appendLog("\n--- 3b. Building Disk Image (.dmg) ---")
+            appendLog("\n--- 3c. Building Disk Image (.dmg) ---")
 
             do {
+                let useInstallerPackage = packageToPkg && distributionProject.diskImage.includeInstallerPackage
+                if useInstallerPackage && !pkgBuildSucceeded {
+                    throw DistributionBuildError.installerPackageUnavailable
+                }
+                let diskImagePayloadURL = useInstallerPackage ? URL(fileURLWithPath: pkgOutputPath) : fileUrl
+                let diskImagePayloadPath = useInstallerPackage ? pkgOutputPath : workingTarget
+                var diskImageSettings = distributionProject.diskImage
+                if useInstallerPackage {
+                    diskImageSettings.includeApplicationsLink = false
+                }
+                appendLog(useInstallerPackage
+                    ? "DMG payload: completed installer package"
+                    : "DMG payload: application bundle")
+
                 try await buildCustomizedDiskImage(
-                    appURL: fileUrl,
-                    workingTarget: workingTarget,
+                    payloadURL: diskImagePayloadURL,
+                    workingTarget: diskImagePayloadPath,
                     outputPath: dmgOutputPath,
-                    settings: distributionProject.diskImage,
+                    settings: diskImageSettings,
                     assets: distributionAssets
                 )
                 appendLog("DMG disk image created at: \(dmgOutputPath)")
@@ -406,66 +486,6 @@ public class NotaryService: ObservableObject {
             } catch {
                 distributionBuildHadError = true
                 appendLog("DMG compilation error: \(error.localizedDescription)")
-            }
-        }
-        
-        // 3c. Build Installer Package (.pkg)
-        if fileExtension == "app" && packageToPkg {
-            currentStep = "Building Package (.pkg)..."
-            progress = 0.7
-            let pkgOutputPath = parentDir.appendingPathComponent("\(appName).pkg").path
-            appendLog("\n--- 3c. Building Installer Package (.pkg) ---")
-
-            do {
-                try await buildCustomizedInstaller(
-                    appURL: fileUrl,
-                    workingTarget: workingTarget,
-                    outputPath: pkgOutputPath,
-                    signingIdentity: signPkgIdentity,
-                    settings: distributionProject.installer,
-                    assets: distributionAssets
-                )
-                appendLog("Package created at: \(pkgOutputPath)")
-
-                if !packageToDmg {
-                    workingTarget = pkgOutputPath
-                }
-
-                if performNotarization {
-                    appendLog("Notarizing PKG...")
-                    var notaryArgs = ["notarytool", "submit", pkgOutputPath, "--wait"]
-                    if credentialType == .keychainProfile {
-                        notaryArgs.append(contentsOf: ["--keychain-profile", keychainProfile])
-                    } else {
-                        notaryArgs.append(contentsOf: ["--key-id", apiKeyId, "--issuer", apiIssuerId, "--key", apiKeyPath])
-                    }
-
-                    let submitStatus = try await ShellManager.shared.runStream(
-                        executable: "/usr/bin/xcrun",
-                        arguments: notaryArgs,
-                        processId: activeProcessId
-                    ) { [weak self] line in
-                        Task { @MainActor in self?.appendLog("  \(line)") }
-                    }
-
-                    if submitStatus == 0 {
-                        appendLog("Stapling ticket to PKG...")
-                        _ = try await ShellManager.shared.runStream(
-                            executable: "/usr/bin/xcrun",
-                            arguments: ["stapler", "staple", pkgOutputPath],
-                            processId: activeProcessId
-                        ) { [weak self] line in
-                            Task { @MainActor in self?.appendLog("  \(line)") }
-                        }
-                    } else {
-                        appendLog("Warning: PKG notarization failed.")
-                    }
-                } else {
-                    appendLog("Skipped: PKG notarization (distribution-only build)")
-                }
-            } catch {
-                distributionBuildHadError = true
-                appendLog("Packaging execution error: \(error.localizedDescription)")
             }
         }
         
@@ -688,7 +708,7 @@ public class NotaryService: ObservableObject {
     }
 
     private func buildCustomizedDiskImage(
-        appURL: URL,
+        payloadURL: URL,
         workingTarget: String,
         outputPath: String,
         settings: DiskImageSettings,
@@ -705,11 +725,11 @@ public class NotaryService: ObservableObject {
         try fileManager.createDirectory(at: stagingDirectory, withIntermediateDirectories: true)
         try fileManager.createDirectory(at: mountDirectory, withIntermediateDirectories: true)
 
-        let stagedAppURL = stagingDirectory.appendingPathComponent(appURL.lastPathComponent)
+        let stagedPayloadURL = stagingDirectory.appendingPathComponent(payloadURL.lastPathComponent)
         appendLog("Staging app bundle and disk image assets...")
         let copyStatus = try await ShellManager.shared.runStream(
             executable: "/usr/bin/ditto",
-            arguments: [workingTarget, stagedAppURL.path],
+            arguments: [workingTarget, stagedPayloadURL.path],
             processId: activeProcessId
         ) { [weak self] line in
             Task { @MainActor in self?.appendLog("  \(line)") }
@@ -735,11 +755,17 @@ public class NotaryService: ObservableObject {
 
         let hasVolumeIcon = assets[.dmgVolumeIcon] != nil
         if let volumeIconURL = assets[.dmgVolumeIcon] {
-            try fileManager.copyItem(at: volumeIconURL, to: stagingDirectory.appendingPathComponent(".VolumeIcon.icns"))
+            let stagedVolumeIconURL = stagingDirectory.appendingPathComponent(".VolumeIcon.icns")
+            if volumeIconURL.pathExtension.lowercased() == "png" {
+                appendLog("Converting PNG volume icon to multi-resolution ICNS...")
+                try ICNSConverter.convertPNG(at: volumeIconURL, to: stagedVolumeIconURL)
+            } else {
+                try fileManager.copyItem(at: volumeIconURL, to: stagedVolumeIconURL)
+            }
         }
 
         let volumeName = settings.volumeName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            ? appURL.deletingPathExtension().lastPathComponent
+            ? payloadURL.deletingPathExtension().lastPathComponent
             : settings.volumeName
 
         appendLog("Creating writable disk image...")
@@ -798,8 +824,9 @@ public class NotaryService: ObservableObject {
                 arguments: [
                     scriptURL.path,
                     mountDirectory.lastPathComponent,
+                    mountDirectory.path,
                     String(width), String(height), String(iconSize),
-                    appURL.lastPathComponent, String(appX), String(appY),
+                    payloadURL.lastPathComponent, String(appX), String(appY),
                     settings.includeApplicationsLink ? "1" : "0",
                     String(applicationsX), String(applicationsY),
                     backgroundFileName
@@ -849,16 +876,22 @@ public class NotaryService: ObservableObject {
         """
         on run argv
             set mountedDiskName to item 1 of argv
-            set windowWidth to (item 2 of argv) as integer
-            set windowHeight to (item 3 of argv) as integer
-            set requestedIconSize to (item 4 of argv) as integer
-            set appName to item 5 of argv
-            set appX to (item 6 of argv) as integer
-            set appY to (item 7 of argv) as integer
-            set hasApplicationsLink to item 8 of argv
-            set applicationsX to (item 9 of argv) as integer
-            set applicationsY to (item 10 of argv) as integer
-            set backgroundName to item 11 of argv
+            set mountedDiskPath to item 2 of argv
+            set windowWidth to (item 3 of argv) as integer
+            set windowHeight to (item 4 of argv) as integer
+            set requestedIconSize to (item 5 of argv) as integer
+            set appName to item 6 of argv
+            set appX to (item 7 of argv) as integer
+            set appY to (item 8 of argv) as integer
+            set hasApplicationsLink to item 9 of argv
+            set applicationsX to (item 10 of argv) as integer
+            set applicationsY to (item 11 of argv) as integer
+            set backgroundName to item 12 of argv
+
+            set backgroundFileAlias to missing value
+            if backgroundName is not "" then
+                set backgroundFileAlias to (POSIX file (mountedDiskPath & "/.background/" & backgroundName)) as alias
+            end if
 
             tell application "Finder"
                 tell disk mountedDiskName
@@ -874,10 +907,10 @@ public class NotaryService: ObservableObject {
                         set arrangement to not arranged
                         set icon size to requestedIconSize
                         set text size to 12
-                        if backgroundName is not "" then
-                            set background picture to file (".background:" & backgroundName)
-                        end if
                     end tell
+                    if backgroundFileAlias is not missing value then
+                        set background picture of icon view options of container window to backgroundFileAlias
+                    end if
                     set position of item appName to {appX, appY}
                     if hasApplicationsLink is "1" then
                         set position of item "Applications" to {applicationsX, applicationsY}
