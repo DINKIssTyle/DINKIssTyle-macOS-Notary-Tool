@@ -1,0 +1,29 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon\r
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# Swift Package Manager
+.build/
+Packages/
+Package.resolved
+
+# Custom build directories & logs
+build/
+build_err.txt
+
+# Xcode / SPM User Settings
+.swiftpm/xcode/
+.swiftpm/configuration/
+.swiftpm/security/
+*.xcodeproj/
+*.xcworkspace/
+xcuserdata/
+DerivedData/
