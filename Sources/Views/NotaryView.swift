@@ -67,6 +67,8 @@ struct NotaryView: View {
     @State private var pkgOptionsExpanded = true
     @State private var dmgOptionsExpanded = true
     @State private var pendingProjectArchiveURL: URL?
+    @State private var pendingProjectTargetRelink = false
+    @State private var activeProjectArchiveURL: URL?
     @State private var lastHandledDocumentRequestID: UUID?
     
     // Credentials selection
@@ -122,8 +124,13 @@ struct NotaryView: View {
         }
         .onChange(of: selectedFile) { file in
             let projectArchiveURL = pendingProjectArchiveURL
+            let shouldRelinkTarget = pendingProjectTargetRelink
             pendingProjectArchiveURL = nil
+            pendingProjectTargetRelink = false
             loadWorkflow(for: file, projectArchiveURL: projectArchiveURL)
+            if shouldRelinkTarget, let file {
+                saveDistributionProject(for: file)
+            }
         }
         .onChange(of: distributionProject) { _ in
             scheduleProjectSave()
@@ -808,6 +815,7 @@ struct NotaryView: View {
         distributionAssets = [:]
         hasProjectArchive = false
         projectStatus = ""
+        activeProjectArchiveURL = nil
 
         if let extractedProjectDirectory {
             try? FileManager.default.removeItem(at: extractedProjectDirectory)
@@ -838,6 +846,7 @@ struct NotaryView: View {
                 extractedProjectDirectory = loaded.extractionDirectory
                 hasProjectArchive = true
                 let loadedArchiveURL = projectArchiveURL ?? DistributionProjectArchive.archiveURL(for: file)
+                activeProjectArchiveURL = loadedArchiveURL
                 projectStatus = "Loaded \(loadedArchiveURL.lastPathComponent)"
             } else {
                 distributionProject = isApp ? defaultProject(for: file) : DistributionProject()
@@ -861,9 +870,9 @@ struct NotaryView: View {
     }
 
     private func openProjectArchive(_ archiveURL: URL) {
+        let loadedProject: LoadedDistributionProject
         do {
-            let validationResult = try DistributionProjectArchive.load(from: archiveURL)
-            try? FileManager.default.removeItem(at: validationResult.extractionDirectory)
+            loadedProject = try DistributionProjectArchive.load(from: archiveURL)
         } catch {
             showProjectAlert(
                 title: "Unable to Open Project",
@@ -872,35 +881,52 @@ struct NotaryView: View {
             service.appendLog("Project open error: \(error.localizedDescription)")
             return
         }
+        defer { try? FileManager.default.removeItem(at: loadedProject.extractionDirectory) }
 
+        let savedTargetURL = DistributionProjectArchive.targetURL(for: loadedProject.project)
+        let targetURL: URL?
+        if let savedTargetURL {
+            targetURL = isSupportedProjectTarget(savedTargetURL) ? savedTargetURL : nil
+        } else {
+            targetURL = legacyTargetURL(for: archiveURL)
+        }
+
+        if let targetURL {
+            selectProjectTarget(targetURL, archiveURL: archiveURL, shouldRelinkTarget: false)
+        } else {
+            chooseProjectTarget(for: archiveURL, expectedTargetURL: savedTargetURL)
+        }
+    }
+
+    private func legacyTargetURL(for archiveURL: URL) -> URL? {
         let targetName = archiveURL.deletingPathExtension().lastPathComponent
         let directory = archiveURL.deletingLastPathComponent()
         let appTargetURL = directory.appendingPathComponent(targetName).appendingPathExtension("app")
         let packageTargetURL = directory.appendingPathComponent(targetName).appendingPathExtension("pkg")
-        let targetURL: URL?
-        if FileManager.default.fileExists(atPath: appTargetURL.path) {
-            // A .dnt is normally saved from its source app. Prefer it when a
-            // generated package with the same name also exists beside it.
-            targetURL = appTargetURL
-        } else if FileManager.default.fileExists(atPath: packageTargetURL.path) {
-            targetURL = packageTargetURL
-        } else {
-            targetURL = nil
-        }
-
-        if let targetURL {
-            selectProjectTarget(targetURL, archiveURL: archiveURL)
-        } else {
-            chooseProjectTarget(for: archiveURL)
-        }
+        return [appTargetURL, packageTargetURL].first(where: isSupportedProjectTarget)
     }
 
-    private func chooseProjectTarget(for archiveURL: URL) {
+    private func isSupportedProjectTarget(_ url: URL) -> Bool {
+        let targetExtension = url.pathExtension.lowercased()
+        var isDirectory: ObjCBool = false
+        guard ["app", "pkg"].contains(targetExtension),
+              FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) else {
+            return false
+        }
+        return targetExtension != "app" || isDirectory.boolValue
+    }
+
+    private func chooseProjectTarget(for archiveURL: URL, expectedTargetURL: URL?) {
         let panel = NSOpenPanel()
         panel.title = "Choose Project Target"
         panel.message = "Choose the .app or .pkg associated with \(archiveURL.lastPathComponent)."
         panel.prompt = "Choose"
-        panel.directoryURL = archiveURL.deletingLastPathComponent()
+        if let expectedDirectory = expectedTargetURL?.deletingLastPathComponent(),
+           FileManager.default.fileExists(atPath: expectedDirectory.path) {
+            panel.directoryURL = expectedDirectory
+        } else {
+            panel.directoryURL = archiveURL.deletingLastPathComponent()
+        }
         panel.allowedContentTypes = [
             .applicationBundle,
             UTType(filenameExtension: "pkg")
@@ -910,7 +936,10 @@ struct NotaryView: View {
         panel.canChooseFiles = true
         panel.treatsFilePackagesAsDirectories = false
 
-        guard panel.runModal() == .OK, let targetURL = panel.url else { return }
+        guard panel.runModal() == .OK, let targetURL = panel.url else {
+            resetToInitialScreen()
+            return
+        }
         let targetExtension = targetURL.pathExtension.lowercased()
         guard targetExtension == "app" || targetExtension == "pkg" else {
             showProjectAlert(
@@ -920,65 +949,32 @@ struct NotaryView: View {
             return
         }
 
-        do {
-            guard let adjacentArchiveURL = try copyProjectArchiveIfNeeded(archiveURL, nextTo: targetURL) else {
-                return
-            }
-            selectProjectTarget(targetURL, archiveURL: adjacentArchiveURL)
-        } catch {
-            showProjectAlert(
-                title: "Unable to Copy Project",
-                message: error.localizedDescription
-            )
-            service.appendLog("Project copy error: \(error.localizedDescription)")
-        }
+        selectProjectTarget(targetURL, archiveURL: archiveURL, shouldRelinkTarget: true)
     }
 
-    private func copyProjectArchiveIfNeeded(_ sourceURL: URL, nextTo targetURL: URL) throws -> URL? {
-        let fileManager = FileManager.default
-        let destinationURL = DistributionProjectArchive.archiveURL(for: targetURL)
-        if sourceURL.standardizedFileURL == destinationURL.standardizedFileURL {
-            return sourceURL
-        }
-
-        if fileManager.fileExists(atPath: destinationURL.path) {
-            let alert = NSAlert()
-            alert.alertStyle = .warning
-            alert.messageText = "A Project Already Exists"
-            alert.informativeText = "\(destinationURL.lastPathComponent) already exists next to the selected target."
-            alert.addButton(withTitle: "Replace Existing")
-            alert.addButton(withTitle: "Use Existing")
-            alert.addButton(withTitle: "Cancel")
-
-            switch alert.runModal() {
-            case .alertFirstButtonReturn:
-                break
-            case .alertSecondButtonReturn:
-                return destinationURL
-            default:
-                return nil
-            }
-        }
-
-        let temporaryURL = destinationURL.deletingLastPathComponent()
-            .appendingPathComponent(".\(destinationURL.lastPathComponent).\(UUID().uuidString).tmp")
-        defer { try? fileManager.removeItem(at: temporaryURL) }
-
-        try fileManager.copyItem(at: sourceURL, to: temporaryURL)
-        if fileManager.fileExists(atPath: destinationURL.path) {
-            _ = try fileManager.replaceItemAt(destinationURL, withItemAt: temporaryURL)
+    private func resetToInitialScreen() {
+        pendingProjectArchiveURL = nil
+        pendingProjectTargetRelink = false
+        if selectedFile == nil {
+            loadWorkflow(for: nil)
         } else {
-            try fileManager.moveItem(at: temporaryURL, to: destinationURL)
+            selectedFile = nil
         }
-        service.appendLog("Copied project to \(destinationURL.path)")
-        return destinationURL
     }
 
-    private func selectProjectTarget(_ targetURL: URL, archiveURL: URL) {
+    private func selectProjectTarget(
+        _ targetURL: URL,
+        archiveURL: URL,
+        shouldRelinkTarget: Bool
+    ) {
         if selectedFile?.standardizedFileURL == targetURL.standardizedFileURL {
             loadWorkflow(for: targetURL, projectArchiveURL: archiveURL)
+            if shouldRelinkTarget {
+                saveDistributionProject(for: targetURL)
+            }
         } else {
             pendingProjectArchiveURL = archiveURL
+            pendingProjectTargetRelink = shouldRelinkTarget
             selectedFile = targetURL
         }
     }
@@ -1024,8 +1020,10 @@ struct NotaryView: View {
             let url = try DistributionProjectArchive.save(
                 distributionProject,
                 for: appURL,
+                at: activeProjectArchiveURL,
                 assetSources: distributionAssets
             )
+            activeProjectArchiveURL = url
             hasProjectArchive = true
             projectStatus = "Saved \(url.lastPathComponent)"
         } catch {

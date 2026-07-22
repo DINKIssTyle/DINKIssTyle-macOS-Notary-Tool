@@ -265,9 +265,10 @@ public struct DiskImageSettings: Codable, Equatable, Sendable {
 }
 
 public struct DistributionProject: Codable, Equatable, Sendable {
-    public static let currentFormatVersion = 1
+    public static let currentFormatVersion = 2
 
     public var formatVersion = DistributionProject.currentFormatVersion
+    public var targetRelativePath: String?
     public var buildInstaller = false
     public var signInstaller = false
     public var installerIdentity = ""
@@ -298,13 +299,14 @@ public enum DistributionProjectArchive {
     public static func save(
         _ project: DistributionProject,
         for appURL: URL,
+        at projectArchiveURL: URL? = nil,
         assetSources: [DistributionAssetKind: URL]
     ) throws -> URL {
         let fileManager = FileManager.default
         let stagingDirectory = fileManager.temporaryDirectory
             .appendingPathComponent("dnt-save-\(UUID().uuidString)", isDirectory: true)
         let assetsDirectory = stagingDirectory.appendingPathComponent(assetsDirectoryName, isDirectory: true)
-        let outputURL = archiveURL(for: appURL)
+        let outputURL = projectArchiveURL ?? archiveURL(for: appURL)
         let temporaryArchive = outputURL.deletingLastPathComponent()
             .appendingPathComponent(".\(outputURL.lastPathComponent).\(UUID().uuidString).tmp")
 
@@ -316,6 +318,8 @@ public enum DistributionProjectArchive {
         try fileManager.createDirectory(at: assetsDirectory, withIntermediateDirectories: true)
 
         var savedProject = project
+        savedProject.formatVersion = DistributionProject.currentFormatVersion
+        savedProject.targetRelativePath = relativeTargetPath(for: appURL)
         for kind in DistributionAssetKind.allCases {
             guard let sourceURL = assetSources[kind] else {
                 setAssetName(nil, kind: kind, project: &savedProject)
@@ -347,6 +351,41 @@ public enum DistributionProjectArchive {
             try fileManager.moveItem(at: temporaryArchive, to: outputURL)
         }
         return outputURL
+    }
+
+    /// Stores target locations relative to the user's home directory so a project
+    /// archive can be moved without changing how its target is resolved.
+    public static func relativeTargetPath(
+        for targetURL: URL,
+        relativeTo baseURL: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> String {
+        let baseComponents = baseURL.standardizedFileURL.pathComponents
+        let targetComponents = targetURL.standardizedFileURL.pathComponents
+        var commonComponentCount = 0
+
+        while commonComponentCount < min(baseComponents.count, targetComponents.count),
+              baseComponents[commonComponentCount] == targetComponents[commonComponentCount] {
+            commonComponentCount += 1
+        }
+
+        let parentComponents = Array(
+            repeating: "..",
+            count: baseComponents.count - commonComponentCount
+        )
+        let childComponents = Array(targetComponents.dropFirst(commonComponentCount))
+        return (parentComponents + childComponents).joined(separator: "/")
+    }
+
+    public static func targetURL(
+        for project: DistributionProject,
+        relativeTo baseURL: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> URL? {
+        guard let relativePath = project.targetRelativePath,
+              !relativePath.isEmpty,
+              !relativePath.hasPrefix("/") else { return nil }
+        return baseURL
+            .appendingPathComponent(relativePath)
+            .standardizedFileURL
     }
 
     public static func load(for appURL: URL) throws -> LoadedDistributionProject? {
