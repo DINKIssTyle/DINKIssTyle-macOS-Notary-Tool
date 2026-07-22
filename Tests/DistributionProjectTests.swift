@@ -4,14 +4,100 @@ import XCTest
 @testable import DKST_macOS_Notary
 
 final class DistributionProjectTests: XCTestCase {
+    @MainActor
+    func testSynchronousProcessDoesNotReenterMainRunLoop() throws {
+        var timerFired = false
+        let timer = Timer.scheduledTimer(withTimeInterval: 0.01, repeats: false) { _ in
+            timerFired = true
+        }
+        defer { timer.invalidate() }
+
+        let result = try ShellManager.shared.runSync(
+            executable: "/bin/sleep",
+            arguments: ["0.05"]
+        )
+
+        XCTAssertEqual(result.status, 0)
+        XCTAssertFalse(timerFired)
+    }
+
+    func testEmbeddedAppUsesOutermostDistributionBundleForStapleValidation() {
+        let embeddedApp = URL(fileURLWithPath: "/Build/InputMethod.app/Contents/Resources/Settings.app")
+
+        XCTAssertEqual(
+            CodeSigningSupport.stapleValidationTargets(for: embeddedApp).map(\.path),
+            [
+                "/Build/InputMethod.app/Contents/Resources/Settings.app",
+                "/Build/InputMethod.app"
+            ]
+        )
+        XCTAssertEqual(
+            CodeSigningSupport.stapleValidationTargets(for: URL(fileURLWithPath: "/Build/InputMethod.app")).map(\.path),
+            ["/Build/InputMethod.app"]
+        )
+    }
+
+    func testGatekeeperNotarizationAssessmentRequiresAcceptedNotarizedSource() {
+        XCTAssertTrue(
+            CodeSigningSupport.isNotarizedGatekeeperAssessment(
+                status: 0,
+                output: "accepted\nsource=Notarized Developer ID"
+            )
+        )
+        XCTAssertFalse(
+            CodeSigningSupport.isNotarizedGatekeeperAssessment(
+                status: 0,
+                output: "accepted\nsource=Developer ID"
+            )
+        )
+        XCTAssertFalse(
+            CodeSigningSupport.isNotarizedGatekeeperAssessment(
+                status: 0,
+                output: "accepted\nsource=Unnotarized Developer ID"
+            )
+        )
+        XCTAssertFalse(
+            CodeSigningSupport.isNotarizedGatekeeperAssessment(
+                status: 3,
+                output: "rejected\nsource=Notarized Developer ID"
+            )
+        )
+    }
+
+    func testAppNotarizationIsReusedOnlyForAnUnchangedAppWithAValidTicket() {
+        XCTAssertTrue(CodeSigningSupport.canReuseAppNotarization(wasResigned: false, staplerStatus: 0))
+        XCTAssertFalse(CodeSigningSupport.canReuseAppNotarization(wasResigned: true, staplerStatus: 0))
+        XCTAssertFalse(CodeSigningSupport.canReuseAppNotarization(wasResigned: false, staplerStatus: 65))
+    }
+
+    func testInstallerIdentityUsesBasicSecurityPolicyOutput() {
+        let codeSigningOutput = """
+          1) AAA "Developer ID Application: Example (TEAMID)"
+          2) BBB "Apple Development: Revoked (TEAMID)" (CSSMERR_TP_CERT_REVOKED)
+             1 valid identities found
+        """
+        let basicOutput = """
+          1) CCC "3rd Party Mac Developer Installer: Example (TEAMID)"
+          2) DDD "Developer ID Installer: Example (TEAMID)"
+             2 valid identities found
+        """
+
+        let identities = CodeSigningSupport.identityNames(
+            codeSigningOutput: codeSigningOutput,
+            basicOutput: basicOutput
+        )
+
+        XCTAssertEqual(identities.applications, ["Developer ID Application: Example (TEAMID)"])
+        XCTAssertEqual(identities.installers, ["Developer ID Installer: Example (TEAMID)"])
+    }
+
     func testWorkflowButtonTitlesReflectSigningNotarizationAndDistribution() {
         XCTAssertEqual(
             WorkflowActionPresentation.title(
                 isApp: true,
                 signApp: true,
                 notarize: false,
-                hasDistribution: false,
-                signInstaller: false
+                hasDistribution: false
             ),
             "Sign App"
         )
@@ -20,8 +106,7 @@ final class DistributionProjectTests: XCTestCase {
                 isApp: true,
                 signApp: false,
                 notarize: true,
-                hasDistribution: false,
-                signInstaller: false
+                hasDistribution: false
             ),
             "Notarize App"
         )
@@ -30,8 +115,7 @@ final class DistributionProjectTests: XCTestCase {
                 isApp: true,
                 signApp: true,
                 notarize: true,
-                hasDistribution: true,
-                signInstaller: false
+                hasDistribution: true
             ),
             "Sign, Notarize & Create Distribution"
         )
@@ -40,21 +124,26 @@ final class DistributionProjectTests: XCTestCase {
                 isApp: true,
                 signApp: false,
                 notarize: false,
-                hasDistribution: true,
-                signInstaller: true
+                hasDistribution: true
             ),
-            "Create Signed Distribution"
+            "Create Distribution"
         )
         XCTAssertEqual(
             WorkflowActionPresentation.title(
                 isApp: false,
                 signApp: false,
                 notarize: false,
-                hasDistribution: false,
-                signInstaller: false
+                hasDistribution: false
             ),
             "Choose an Action"
         )
+    }
+
+    func testInstallerSigningFollowsNotarizationToggle() {
+        XCTAssertFalse(WorkflowSigningPolicy.shouldSignInstaller(buildInstaller: false, notarize: false))
+        XCTAssertFalse(WorkflowSigningPolicy.shouldSignInstaller(buildInstaller: false, notarize: true))
+        XCTAssertFalse(WorkflowSigningPolicy.shouldSignInstaller(buildInstaller: true, notarize: false))
+        XCTAssertTrue(WorkflowSigningPolicy.shouldSignInstaller(buildInstaller: true, notarize: true))
     }
 
     func testOlderInstallerSettingsUseSystemApplicationsDefaults() throws {
@@ -365,6 +454,8 @@ final class DistributionProjectTests: XCTestCase {
         )
         XCTAssertTrue(distributionXML.contains(#"<license file="license.rtf" mime-type="text/rtf"/>"#), distributionXML)
         XCTAssertTrue(distributionXML.contains(#"<readme file="readme.rtfd" uti="com.apple.rtfd"/>"#), distributionXML)
+        XCTAssertTrue(distributionXML.contains(">#component.pkg</pkg-ref>"), distributionXML)
+        XCTAssertFalse(distributionXML.contains(">component.pkg</pkg-ref>"), distributionXML)
         let packagedReadMeURL = expandedPackageURL
             .appendingPathComponent("Resources", isDirectory: true)
             .appendingPathComponent("readme.rtfd", isDirectory: true)

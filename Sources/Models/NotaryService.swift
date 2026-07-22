@@ -90,7 +90,7 @@ public class NotaryService: ObservableObject {
         VerificationItem(title: "Code Signature", description: "Verifies that the bundle has a valid code signature."),
         VerificationItem(title: "Hardened Runtime", description: "Ensures Hardened Runtime is enabled for security."),
         VerificationItem(title: "Notarization Ticket", description: "Checks if the app has been registered with Apple's Notary service."),
-        VerificationItem(title: "Stapled Ticket", description: "Verifies the notarization ticket is stapled to the bundle."),
+        VerificationItem(title: "Stapled Ticket", description: "Verifies an offline ticket is stapled to the distributed bundle."),
         VerificationItem(title: "Gatekeeper Assessment", description: "Simulates macOS Gatekeeper security verification.")
     ]
     
@@ -104,40 +104,39 @@ public class NotaryService: ObservableObject {
     /// Fetches valid code signing identities from the system keychain.
     public func fetchCertificates() {
         do {
-            let (status, output) = try ShellManager.shared.runSync(
+            let (codeSigningStatus, codeSigningOutput) = try ShellManager.shared.runSync(
                 executable: "/usr/bin/security",
                 arguments: ["find-identity", "-v", "-p", "codesigning"]
             )
-            
-            if status != 0 {
-                appendLog("Error querying keychain certificates: \(status)")
+
+            if codeSigningStatus != 0 {
+                appendLog("Error querying application signing certificates: \(codeSigningStatus)")
                 return
             }
-            
-            var apps: [String] = []
-            var installers: [String] = []
-            
-            let lines = output.components(separatedBy: .newlines)
-            for line in lines {
-                if let startIdx = line.firstIndex(of: "\""),
-                   let endIdx = line.lastIndex(of: "\""),
-                   startIdx < endIdx {
-                    let certName = String(line[line.index(after: startIdx)..<endIdx])
-                    if certName.contains("Developer ID Application") {
-                        apps.append(certName)
-                    } else if certName.contains("Developer ID Installer") {
-                        installers.append(certName)
-                    } else {
-                        // Include standard codesign certificates too
-                        apps.append(certName)
-                    }
-                }
+
+            // Installer identities don't participate in the `codesigning` policy.
+            // Query the basic identity policy separately so Developer ID Installer
+            // certificates with their private keys are discoverable.
+            let (basicStatus, basicOutput) = try ShellManager.shared.runSync(
+                executable: "/usr/bin/security",
+                arguments: ["find-identity", "-v", "-p", "basic"]
+            )
+            if basicStatus != 0 {
+                appendLog("Error querying installer signing certificates: \(basicStatus)")
+                return
             }
-            
-            self.appIdentities = apps.sorted()
-            self.installerIdentities = installers.sorted()
-            
-            appendLog("Keychain certificates loaded: \(apps.count) App, \(installers.count) Installer profiles.")
+
+            let identities = CodeSigningSupport.identityNames(
+                codeSigningOutput: codeSigningOutput,
+                basicOutput: basicOutput
+            )
+            self.appIdentities = identities.applications
+            self.installerIdentities = identities.installers
+
+            appendLog(
+                "Keychain certificates loaded: \(identities.applications.count) App, "
+                    + "\(identities.installers.count) Installer profiles."
+            )
         } catch {
             appendLog("Failed to read certificates: \(error.localizedDescription)")
         }
@@ -205,6 +204,16 @@ public class NotaryService: ObservableObject {
         }
         appendLog("=== Starting \(workflowName) ===")
         appendLog("Target File: \(path)")
+
+        if fileExtension == "app",
+           packageToPkg,
+           performNotarization,
+           signPkgIdentity?.isEmpty != false {
+            appendLog("Error: A Developer ID Installer certificate is required to sign and notarize a new PKG.")
+            isProcessing = false
+            currentStep = "Missing Installer Certificate"
+            return
+        }
         
         let fileManager = FileManager.default
         let tempDir = fileManager.temporaryDirectory
@@ -232,7 +241,8 @@ public class NotaryService: ObservableObject {
             }
         }
 
-        if fileExtension == "app" && performNotarization {
+        var shouldSubmitAppForNotarization = fileExtension == "app" && performNotarization
+        if shouldSubmitAppForNotarization {
             currentStep = "Validating Code Tree..."
             appendLog("\n--- Code Signing Preflight ---")
             let rootURL = URL(fileURLWithPath: workingTarget)
@@ -245,10 +255,17 @@ public class NotaryService: ObservableObject {
                 return
             }
             appendLog("Code signing preflight completed successfully.")
+
+            if await reuseExistingAppNotarizationIfAvailable(
+                at: rootURL,
+                appWasResigned: performsCodeSigning
+            ) {
+                shouldSubmitAppForNotarization = false
+            }
         }
 
         // 2. Notarize the .app bundle first so that packaged formats contain the stapled app.
-        if fileExtension == "app" && performNotarization {
+        if shouldSubmitAppForNotarization {
             currentStep = "Notarizing App Bundle..."
             progress = 0.3
             appendLog("\n--- 2. Notarizing App Bundle ---")
@@ -644,6 +661,61 @@ public class NotaryService: ObservableObject {
         appendLog("Code tree signed and verified successfully.")
     }
 
+    private func reuseExistingAppNotarizationIfAvailable(
+        at appURL: URL,
+        appWasResigned: Bool
+    ) async -> Bool {
+        appendLog("\n--- Existing App Notarization Check ---")
+
+        if appWasResigned {
+            appendLog("The app was re-signed in this workflow, so any previous notarization cannot be reused.")
+            return false
+        }
+
+        appendLog("Checking for a valid existing stapled ticket...")
+        do {
+            let (status, output) = try ShellManager.shared.runSync(
+                executable: "/usr/bin/xcrun",
+                arguments: ["stapler", "validate", appURL.path]
+            )
+            appendLog(output)
+            if CodeSigningSupport.canReuseAppNotarization(
+                wasResigned: appWasResigned,
+                staplerStatus: status
+            ) {
+                appendLog("Reusing the existing app notarization. App submission will be skipped.")
+                return true
+            }
+        } catch {
+            appendLog("Existing ticket validation error: \(error.localizedDescription)")
+        }
+
+        appendLog("No valid stapled ticket was found. Attempting to retrieve an existing ticket...")
+        do {
+            let stapleStatus = try await ShellManager.shared.runStream(
+                executable: "/usr/bin/xcrun",
+                arguments: ["stapler", "staple", appURL.path],
+                processId: activeProcessId
+            ) { [weak self] line in
+                Task { @MainActor in self?.appendLog("  \(line)") }
+            }
+
+            if CodeSigningSupport.canReuseAppNotarization(
+                wasResigned: appWasResigned,
+                staplerStatus: stapleStatus
+            ) {
+                appendLog("Retrieved the existing app ticket. App submission will be skipped.")
+                return true
+            }
+            appendLog("No reusable app ticket was available. The app will be submitted for notarization.")
+        } catch {
+            appendLog("Existing ticket retrieval error: \(error.localizedDescription)")
+            appendLog("The app will be submitted for notarization.")
+        }
+
+        return false
+    }
+
     private func verifyCodeTree(at rootURL: URL) -> Bool {
         do {
             let targets = try CodeSigningSupport.signingTargets(in: rootURL)
@@ -827,7 +899,10 @@ public class NotaryService: ObservableObject {
             finalPresentationElements.append(backgroundElement)
         }
 
-        func distributionXML(presentationElements: [String]) -> String {
+        func distributionXML(
+            presentationElements: [String],
+            componentReference: String = "component.pkg"
+        ) -> String {
             """
             <?xml version="1.0" encoding="utf-8"?>
             <installer-gui-script minSpecVersion="2">
@@ -844,7 +919,7 @@ public class NotaryService: ObservableObject {
                 <choice id="app" visible="false">
                     <pkg-ref id="\(xmlEscaped(identifier))"/>
                 </choice>
-                <pkg-ref id="\(xmlEscaped(identifier))" version="\(xmlEscaped(version))" onConclusion="\(settings.conclusionAction.distributionValue)">component.pkg</pkg-ref>
+                <pkg-ref id="\(xmlEscaped(identifier))" version="\(xmlEscaped(version))" onConclusion="\(settings.conclusionAction.distributionValue)">\(xmlEscaped(componentReference))</pkg-ref>
             </installer-gui-script>
             """
         }
@@ -910,7 +985,10 @@ public class NotaryService: ObservableObject {
                     originalContentsURL: nil
                 )
             }
-            try distributionXML(presentationElements: finalPresentationElements)
+            try distributionXML(
+                presentationElements: finalPresentationElements,
+                componentReference: "#component.pkg"
+            )
                 .write(
                     to: expandedURL.appendingPathComponent("Distribution"),
                     atomically: true,
@@ -1273,35 +1351,7 @@ public class NotaryService: ObservableObject {
             }
         }
         
-        // 3. Notarization check (Assessed via spctl assessment or stapler)
-        verificationItems[2].status = .running
-        // 4. Staple validation
-        verificationItems[3].status = .running
-        
-        appendLog("Validating Stapler ticket...")
-        let stapleVerifyArgs = ["stapler", "validate", targetPath]
-        do {
-            let (status, output) = try ShellManager.shared.runSync(executable: "/usr/bin/xcrun", arguments: stapleVerifyArgs)
-            appendLog(output)
-            verificationItems[3].status = (status == 0) ? .success : .failure
-            // If stapled is true, notarized is implicitly true
-            verificationItems[2].status = (status == 0) ? .success : .failure
-        } catch {
-            verificationItems[3].status = .failure
-            verificationItems[2].status = .failure
-        }
-        
-        // 5. Gatekeeper Assessment
-        verificationItems[4].status = .running
-        appendLog("Simulating macOS Gatekeeper installation check...")
-        let spctlArgs = ["--assess", "-vv", "--type", isPkg ? "install" : "execute", targetPath]
-        do {
-            let (status, output) = try ShellManager.shared.runSync(executable: "/usr/sbin/spctl", arguments: spctlArgs)
-            appendLog(output)
-            verificationItems[4].status = (status == 0) ? .success : .failure
-        } catch {
-            verificationItems[4].status = .failure
-        }
+        runNotarizationVerification(targetPath: targetPath, isPkg: isPkg)
     }
     
     /// Fetches all stored notary profiles from the macOS keychain and combines them with local app profiles.
@@ -1385,7 +1435,7 @@ public class NotaryService: ObservableObject {
         } else {
             verificationItems[0].status = verifyCodeTree(at: URL(fileURLWithPath: targetPath)) ? .success : .failure
         }
-        
+
         // 2. Hardened Runtime
         verificationItems[1].status = .running
         if isPkg {
@@ -1395,37 +1445,68 @@ public class NotaryService: ObservableObject {
             appendLog("Checking Hardened Runtime across the code tree...")
             verificationItems[1].status = verifyHardenedRuntimeTree(at: URL(fileURLWithPath: targetPath)) ? .success : .failure
         }
-        
-        // 3 & 4. Notarization Ticket / Stapled Ticket
+
+        runNotarizationVerification(targetPath: targetPath, isPkg: isPkg)
+
+        isProcessing = false
+        appendLog("=== Verification Completed ===")
+    }
+
+    private func runNotarizationVerification(targetPath: String, isPkg: Bool) {
         verificationItems[2].status = .running
         verificationItems[3].status = .running
-        appendLog("Validating Stapler ticket...")
-        let staplerArgs = ["stapler", "validate", targetPath]
-        do {
-            let (status, output) = try ShellManager.shared.runSync(executable: "/usr/bin/xcrun", arguments: staplerArgs)
-            appendLog(output)
-            
-            let isStapled = (status == 0)
-            verificationItems[3].status = isStapled ? .success : .failure
-            verificationItems[2].status = isStapled ? .success : .failure
-        } catch {
-            verificationItems[3].status = .failure
-            verificationItems[2].status = .failure
-        }
-        
-        // 5. Gatekeeper Assessment
         verificationItems[4].status = .running
+
+        appendLog("Validating stapled ticket...")
+        let targetURL = URL(fileURLWithPath: targetPath)
+        let ticketTargets = CodeSigningSupport.stapleValidationTargets(for: targetURL)
+        var isStapled = false
+
+        for (index, ticketTarget) in ticketTargets.enumerated() {
+            if index > 0 {
+                appendLog("Direct ticket validation did not succeed for the embedded app.")
+                appendLog("Checking the containing distribution bundle: \(ticketTarget.path)")
+            }
+
+            do {
+                let (status, output) = try ShellManager.shared.runSync(
+                    executable: "/usr/bin/xcrun",
+                    arguments: ["stapler", "validate", ticketTarget.path]
+                )
+                appendLog(output)
+                if status == 0 {
+                    isStapled = true
+                    if index > 0 {
+                        appendLog("The embedded app is covered by the containing bundle's stapled ticket.")
+                    }
+                    break
+                }
+            } catch {
+                appendLog("Stapler validation error: \(error.localizedDescription)")
+            }
+        }
+        verificationItems[3].status = isStapled ? .success : .failure
+
         appendLog("Simulating macOS Gatekeeper installation check...")
         let spctlArgs = ["--assess", "-vv", "--type", isPkg ? "install" : "execute", targetPath]
         do {
-            let (status, output) = try ShellManager.shared.runSync(executable: "/usr/sbin/spctl", arguments: spctlArgs)
+            let (status, output) = try ShellManager.shared.runSync(
+                executable: "/usr/sbin/spctl",
+                arguments: spctlArgs
+            )
             appendLog(output)
-            verificationItems[4].status = (status == 0) ? .success : .failure
+            let isNotarized = isStapled || CodeSigningSupport.isNotarizedGatekeeperAssessment(
+                status: status,
+                output: output
+            )
+            verificationItems[2].status = isNotarized ? .success : .failure
+            verificationItems[4].status = status == 0 ? .success : .failure
         } catch {
+            // A successfully validated ticket is conclusive proof of notarization,
+            // even when the local Gatekeeper assessment command is unavailable.
+            verificationItems[2].status = isStapled ? .success : .failure
             verificationItems[4].status = .failure
+            appendLog("Gatekeeper assessment error: \(error.localizedDescription)")
         }
-        
-        isProcessing = false
-        appendLog("=== Verification Completed ===")
     }
 }

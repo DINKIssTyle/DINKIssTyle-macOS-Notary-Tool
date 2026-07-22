@@ -1,6 +1,11 @@
 import Foundation
 
 enum CodeSigningSupport {
+    struct IdentityNames: Equatable {
+        let applications: [String]
+        let installers: [String]
+    }
+
     private static let codeBundleExtensions: Set<String> = [
         "app", "appex", "bundle", "framework", "inputmethod", "mdimporter",
         "plugin", "prefpane", "qlgenerator", "saver", "service", "workflow", "xpc"
@@ -50,6 +55,64 @@ enum CodeSigningSupport {
         var seen = Set<String>()
         return (machOBinaries + nestedBundles + [rootURL]).filter {
             seen.insert($0.standardizedFileURL.path).inserted
+        }
+    }
+
+    /// Returns the selected item followed by the outermost containing app, when
+    /// the item is nested inside another app bundle. The ticket is stapled to the
+    /// outermost item being distributed, so an embedded app can legitimately rely
+    /// on the ticket stapled to its containing distribution bundle.
+    static func stapleValidationTargets(for targetURL: URL) -> [URL] {
+        let target = targetURL.standardizedFileURL
+        var ancestor = target.deletingLastPathComponent()
+        var outermostContainingApp: URL?
+
+        while ancestor.path != "/" {
+            if ancestor.pathExtension.lowercased() == "app" {
+                outermostContainingApp = ancestor
+            }
+
+            let parent = ancestor.deletingLastPathComponent()
+            if parent.path == ancestor.path { break }
+            ancestor = parent
+        }
+
+        guard let outermostContainingApp,
+              outermostContainingApp.path != target.path else {
+            return [target]
+        }
+        return [target, outermostContainingApp]
+    }
+
+    static func isNotarizedGatekeeperAssessment(status: Int32, output: String) -> Bool {
+        status == 0 && output.range(of: "source=Notarized", options: .caseInsensitive) != nil
+    }
+
+    static func canReuseAppNotarization(wasResigned: Bool, staplerStatus: Int32) -> Bool {
+        !wasResigned && staplerStatus == 0
+    }
+
+    static func identityNames(codeSigningOutput: String, basicOutput: String) -> IdentityNames {
+        let codeSigningNames = validIdentityNames(in: codeSigningOutput)
+        let basicNames = validIdentityNames(in: basicOutput)
+
+        return IdentityNames(
+            applications: Array(Set(codeSigningNames.filter {
+                !$0.contains("Developer ID Installer")
+            })).sorted(),
+            installers: Array(Set(basicNames.filter {
+                $0.contains("Developer ID Installer")
+            })).sorted()
+        )
+    }
+
+    private static func validIdentityNames(in output: String) -> [String] {
+        output.components(separatedBy: .newlines).compactMap { line in
+            guard !line.contains("CSSMERR_") && !line.contains("errSec") else { return nil }
+            guard let start = line.firstIndex(of: "\""),
+                  let end = line.lastIndex(of: "\""),
+                  start < end else { return nil }
+            return String(line[line.index(after: start)..<end])
         }
     }
 

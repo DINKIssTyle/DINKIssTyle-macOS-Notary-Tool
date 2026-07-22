@@ -28,6 +28,25 @@ private final class StreamingOutputBuffer: @unchecked Sendable {
     }
 }
 
+private final class SynchronousProcessResult: @unchecked Sendable {
+    typealias Value = (status: Int32, output: String)
+
+    private let lock = NSLock()
+    private var result: Result<Value, Error>?
+
+    func store(_ result: Result<Value, Error>) {
+        lock.lock()
+        self.result = result
+        lock.unlock()
+    }
+
+    func take() -> Result<Value, Error>? {
+        lock.lock()
+        defer { lock.unlock() }
+        return result
+    }
+}
+
 public class ShellManager: @unchecked Sendable {
     public static let shared = ShellManager()
     private var activeProcesses: [UUID: Process] = [:]
@@ -116,6 +135,35 @@ public class ShellManager: @unchecked Sendable {
     
     /// Runs a command synchronously and returns the status code and output.
     public func runSync(executable: String, arguments: [String]) throws -> (status: Int32, output: String) {
+        // Process.waitUntilExit() pumps the current thread's run loop. When it is
+        // called on the main thread during an AppKit drop transaction, that lets
+        // SwiftUI's update cycle re-enter itself and can crash inside UpdateCycle.
+        // Keep this compatibility API synchronous for its callers, but perform
+        // the process wait on a worker thread so the main run loop stays blocked.
+        guard Thread.isMainThread else {
+            return try runSyncDirect(executable: executable, arguments: arguments)
+        }
+
+        let completed = DispatchSemaphore(value: 0)
+        let resultBox = SynchronousProcessResult()
+        DispatchQueue.global(qos: .userInitiated).async { [self] in
+            resultBox.store(Result {
+                try runSyncDirect(executable: executable, arguments: arguments)
+            })
+            completed.signal()
+        }
+        completed.wait()
+
+        guard let result = resultBox.take() else {
+            throw CocoaError(.executableLoad)
+        }
+        return try result.get()
+    }
+
+    private func runSyncDirect(
+        executable: String,
+        arguments: [String]
+    ) throws -> (status: Int32, output: String) {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
@@ -125,9 +173,11 @@ public class ShellManager: @unchecked Sendable {
         process.standardError = pipe
         
         try process.run()
-        process.waitUntilExit()
-        
+
+        // Drain output while the process is running. Waiting first can deadlock
+        // when a command writes more data than the pipe buffer can hold.
         let data = try pipe.fileHandleForReading.readToEnd() ?? Data()
+        process.waitUntilExit()
         let output = String(data: data, encoding: .utf8) ?? ""
         
         return (process.terminationStatus, output.trimmingCharacters(in: .whitespacesAndNewlines))

@@ -6,8 +6,7 @@ enum WorkflowActionPresentation {
         isApp: Bool,
         signApp: Bool,
         notarize: Bool,
-        hasDistribution: Bool,
-        signInstaller: Bool
+        hasDistribution: Bool
     ) -> String {
         guard isApp else {
             return notarize ? "Notarize Package" : "Choose an Action"
@@ -22,7 +21,7 @@ enum WorkflowActionPresentation {
             case (false, true):
                 return "Notarize & Create Distribution"
             case (false, false):
-                return signInstaller ? "Create Signed Distribution" : "Create Distribution"
+                return "Create Distribution"
             }
         }
 
@@ -36,6 +35,12 @@ enum WorkflowActionPresentation {
         case (false, false):
             return "Choose an Action"
         }
+    }
+}
+
+enum WorkflowSigningPolicy {
+    static func shouldSignInstaller(buildInstaller: Bool, notarize: Bool) -> Bool {
+        buildInstaller && notarize
     }
 }
 
@@ -280,7 +285,7 @@ struct NotaryView: View {
             }
 
             Text(notarizeOutput
-                 ? "Submit the selected app or package to Apple and staple the returned ticket."
+                 ? "Reuse a valid existing app ticket, then notarize and staple newly created distribution files."
                  : "Skip Apple notarization. Code signing and local distribution builds remain available.")
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
@@ -343,11 +348,11 @@ struct NotaryView: View {
                 
                 if isApp && packageToPkg && pkgOptionsExpanded {
                     VStack(alignment: .leading, spacing: 10) {
-                        Toggle("Sign Installer Package", isOn: $distributionProject.signInstaller)
-                            .font(.system(size: 10))
-                        
-                        if signPkgBundle {
+                        if shouldSignInstallerPackage {
                             VStack(alignment: .leading, spacing: 4) {
+                                Label("PKG signing is included with notarization", systemImage: "signature")
+                                    .font(.system(size: 10, weight: .medium))
+
                                 Text("Developer ID Installer Certificate")
                                     .font(.system(size: 9))
                                     .foregroundStyle(.secondary)
@@ -368,6 +373,10 @@ struct NotaryView: View {
                                     .controlSize(.small)
                                 }
                             }
+                        } else {
+                            Label("Creates an unsigned local package", systemImage: "shippingbox")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.secondary)
                         }
 
                         Divider()
@@ -672,10 +681,15 @@ struct NotaryView: View {
     // MARK: - Helpers
 
     private var packageToPkg: Bool { distributionProject.buildInstaller }
-    private var signPkgBundle: Bool { distributionProject.signInstaller }
     private var selectedPkgIdentity: String { distributionProject.installerIdentity }
     private var packageToDmg: Bool { distributionProject.buildDiskImage }
     private var packageToZip: Bool { distributionProject.buildZipArchive }
+    private var shouldSignInstallerPackage: Bool {
+        WorkflowSigningPolicy.shouldSignInstaller(
+            buildInstaller: packageToPkg,
+            notarize: shouldPerformNotarization
+        )
+    }
     
     private func statusIcon(for status: VerificationStatus) -> some View {
         switch status {
@@ -705,7 +719,7 @@ struct NotaryView: View {
                 return true
             }
 
-            if packageToPkg && signPkgBundle && selectedPkgIdentity.isEmpty {
+            if shouldSignInstallerPackage && selectedPkgIdentity.isEmpty {
                 return true
             }
 
@@ -752,8 +766,7 @@ struct NotaryView: View {
             isApp: selectedFile.pathExtension.lowercased() == "app",
             signApp: signAppBundle,
             notarize: shouldPerformNotarization,
-            hasDistribution: hasDistributionSelection,
-            signInstaller: packageToPkg && signPkgBundle
+            hasDistribution: hasDistributionSelection
         )
     }
 
@@ -1146,7 +1159,7 @@ struct NotaryView: View {
                 fileUrl: file,
                 signAppIdentity: signAppBundle ? selectedAppIdentity : nil,
                 packageToPkg: packageToPkg,
-                signPkgIdentity: (packageToPkg && signPkgBundle) ? selectedPkgIdentity : nil,
+                signPkgIdentity: shouldSignInstallerPackage ? selectedPkgIdentity : nil,
                 packageToDmg: packageToDmg,
                 packageToZip: packageToZip,
                 distributionProject: distributionProject,
