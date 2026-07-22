@@ -72,7 +72,7 @@ You can customize a PKG quickly and easily using DKST macOS Notary Tool.
     1. Conclusion: This is the final screen after the installer installation is complete.
     1. Each screen can be edited by pressing the `Edit` button.
     1. The `Edit` screen is an editor that supports Rich Text Format Directory (.rtfd). You can paste formatted text and images. The easiest way to create and edit an .rtfd document is by using macOS's TextEdit.app. Decorate the document, copy it, and paste it into the `Edit` screen.
-6. **Installer Background**: The .pkg installer supports a background image. By clicking the prompt `Edit PKG-Installer-BG-TEMP.psd as an easy starting point for your background (opens read-only)`, you can open a Photoshop (.PSD) file helpful for editing. Save the modified .PSD file in a location where it can be saved as .PNG, and click `Choose...` to import it.
+6. **Installer Background**: The .pkg installer supports a background image. Click `Edit PKG-Installer-BG-TEMP.psd in this project.` to open the Photoshop (.PSD) template stored inside the `.dnt` project. Save your edits to the PSD and it will be converted to PNG automatically during the build. You can still import a separate image with `Choose...`.
 7. **After Installation**: This is the type of button displayed to the user when the installer installation is complete.
     1. No Action: This is the most common type. The user can finish the installation and close the installer with a close button.
     1. Require Logout: Upon completion of the installation, the only button provided to the user is the logout button. Unless the installer is forcibly closed, the user must log out.
@@ -91,7 +91,7 @@ You can customize a DMG disk quickly and easily using DKST macOS Notary Tool.
     1. **Template 1**: Layout with the app icon on the left and the Applications folder on the right.
     1. **Template 2**: Layout with the app icon at the top and the Applications folder at the bottom.
        <div align="center"><img src="Docs/Screenshot-DMG-Layout-01.png" alt="Template 2" width="550"><br></div>
-    1. When selecting a template, a prompt like `Edit DMG-BG-TEMP.psd as an easy starting point for your background (opens read-only)` will appear, which helps with editing the layout backgrounds. Clicking this opens a Photoshop (.PSD) file. Save the modified .PSD file in a location where it can be saved as .PNG, and click the Window Background `Choose...` button to import it.
+    1. When selecting a template, a prompt such as `Edit DMG-BG-TEMP.psd in this project.` opens the background PSD stored inside the `.dnt` project. Save your edits to the PSD and it will be converted to PNG automatically during the build.
     1. If you did not select `Put Installer Package in DMG` or `Add Applications Shortcut`, a separate layout with the app or .PKG icon in the center will be selected. You can also open a Photoshop (.PSD) file helpful for background editing in this case.
        <div align="center"><img src="Docs/Screenshot-DMG-Layout-02.png" alt="Template 2" width="550"><br></div>
 5. **Add Applications Shortcut**: Select whether to display the Applications folder.
@@ -102,7 +102,7 @@ While signing and notarization are unlikely to be corrupted during compression, 
 When **Build Zip Archive (.zip)** is enabled, the app bundle is compressed into a .ZIP file using ditto.
 
 ## About Auto-Save and Loading
-DKST macOS Notary Tool automatically generates a save file named `.DNT` in the loaded app bundle folder.
+DKST macOS Notary Tool automatically creates a `.DNT` project package in the loaded app bundle folder. Finder presents it as one document, while its project settings, editable PSD templates, and assets are stored in an internal folder structure.
 
 #### Contents of This File
 - The name of the working app bundles
@@ -110,6 +110,7 @@ DKST macOS Notary Tool automatically generates a save file named `.DNT` in the l
 - .RTFD content of .PKG pages
 - .PKG background image
 - .DMG background image, etc.
+- Four editable Photoshop (.PSD) templates
 - Overall working information
 
 Since this file saves the app bundle's location using a relative path based on your user home folder, you can keep the `.DNT` file anywhere. If the app bundle is not in the location saved when you open a `.DNT` file, a file selection window will appear. If you select a new app bundle, that location is saved in the current `.DNT` file, and if you cancel the selection, it returns to the initial screen without selecting an app bundle. Do not copy the `.DNT` file next to the app bundle.

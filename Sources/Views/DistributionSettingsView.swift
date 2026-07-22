@@ -24,6 +24,7 @@ struct InstallerCustomizationView: View {
     let backgroundURL: URL?
     let chooseBackground: () -> Void
     let removeBackground: () -> Void
+    let editTemplate: (String) -> Void
     @State private var editingPage: InstallerPageKind?
 
     var body: some View {
@@ -67,19 +68,20 @@ struct InstallerCustomizationView: View {
 
             Divider()
             AssetPickerRow(
-                title: "Installer Background",
-                subtitle: "PNG, JPEG, TIFF",
+                title: "Installer Background Override",
+                subtitle: "Uses the project PSD by default",
                 selectedURL: backgroundURL,
                 choose: chooseBackground,
                 remove: removeBackground
             )
-            ReadOnlyTemplateButton(fileName: "PKG-Installer-BG-TEMP.psd")
+            ProjectTemplateButton(
+                fileName: DistributionProjectArchive.pkgTemplateName,
+                open: editTemplate
+            )
 
-            if backgroundURL != nil {
-                HStack(spacing: 8) {
-                    compactPicker("Alignment", selection: $settings.backgroundAlignment)
-                    compactPicker("Scaling", selection: $settings.backgroundScaling)
-                }
+            HStack(spacing: 8) {
+                compactPicker("Alignment", selection: $settings.backgroundAlignment)
+                compactPicker("Scaling", selection: $settings.backgroundScaling)
             }
 
             compactPicker("After Installation", selection: $settings.conclusionAction)
@@ -292,6 +294,7 @@ struct DiskImageCustomizationView: View {
     let removeBackground: () -> Void
     let chooseVolumeIcon: () -> Void
     let removeVolumeIcon: () -> Void
+    let editTemplate: (String) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -320,7 +323,7 @@ struct DiskImageCustomizationView: View {
                     settings.applyLayoutTemplate(singleIcon: isSingleIconLayout)
                 }
                 if let templateFileName {
-                    ReadOnlyTemplateButton(fileName: templateFileName)
+                    ProjectTemplateButton(fileName: templateFileName, open: editTemplate)
                 }
             }
 
@@ -332,8 +335,8 @@ struct DiskImageCustomizationView: View {
             .disabled(!isCustomLayout)
 
             AssetPickerRow(
-                title: "Window Background",
-                subtitle: "PNG, JPEG, TIFF",
+                title: isCustomLayout ? "Window Background" : "Window Background Override",
+                subtitle: isCustomLayout ? "PNG, JPEG, TIFF" : "Uses the project PSD by default",
                 selectedURL: backgroundURL,
                 choose: chooseBackground,
                 remove: removeBackground
@@ -432,36 +435,21 @@ struct DiskImageCustomizationView: View {
     }
 }
 
-private struct ReadOnlyTemplateButton: View {
+private struct ProjectTemplateButton: View {
     let fileName: String
+    let open: (String) -> Void
 
     var body: some View {
-        Button(action: openDocument) {
+        Button { open(fileName) } label: {
             HStack(spacing: 4) {
                 Image(systemName: "arrow.up.forward.app")
-                Text("Edit \(fileName) as an easy starting point for your background (opens read-only).")
+                Text("Edit \(fileName) in this project.")
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
         .buttonStyle(.plain)
         .font(.system(size: 9))
-        .foregroundStyle(documentURL == nil ? Color.secondary : Color.accentColor)
-        .disabled(documentURL == nil)
-    }
-
-    private var documentURL: URL? {
-        let name = (fileName as NSString).deletingPathExtension
-        let fileExtension = (fileName as NSString).pathExtension
-        return Bundle.main.url(
-            forResource: name,
-            withExtension: fileExtension,
-            subdirectory: "Templates"
-        )
-    }
-
-    private func openDocument() {
-        guard let documentURL else { return }
-        NSWorkspace.shared.open(documentURL)
+        .foregroundStyle(Color.accentColor)
     }
 }
 

@@ -265,7 +265,7 @@ public struct DiskImageSettings: Codable, Equatable, Sendable {
 }
 
 public struct DistributionProject: Codable, Equatable, Sendable {
-    public static let currentFormatVersion = 2
+    public static let currentFormatVersion = 3
 
     public var formatVersion = DistributionProject.currentFormatVersion
     public var targetRelativePath: String?
@@ -283,12 +283,21 @@ public struct DistributionProject: Codable, Equatable, Sendable {
 public struct LoadedDistributionProject {
     public let project: DistributionProject
     public let assets: [DistributionAssetKind: URL]
-    public let extractionDirectory: URL
+    public let projectDirectory: URL
 }
 
 public enum DistributionProjectArchive {
     private static let manifestName = "project.json"
     private static let assetsDirectoryName = "Assets"
+    private static let templatesDirectoryName = "Templates"
+
+    public static let pkgTemplateName = "PKG-Installer-BG-TEMP.psd"
+    public static let templateFileNames = [
+        "DMG-BG-TEMP0.psd",
+        "DMG-BG-TEMP1.psd",
+        "DMG-BG-TEMP2.psd",
+        pkgTemplateName
+    ]
 
     public static func archiveURL(for appURL: URL) -> URL {
         appURL.deletingLastPathComponent()
@@ -303,54 +312,100 @@ public enum DistributionProjectArchive {
         assetSources: [DistributionAssetKind: URL]
     ) throws -> URL {
         let fileManager = FileManager.default
-        let stagingDirectory = fileManager.temporaryDirectory
-            .appendingPathComponent("dnt-save-\(UUID().uuidString)", isDirectory: true)
-        let assetsDirectory = stagingDirectory.appendingPathComponent(assetsDirectoryName, isDirectory: true)
         let outputURL = projectArchiveURL ?? archiveURL(for: appURL)
-        let temporaryArchive = outputURL.deletingLastPathComponent()
-            .appendingPathComponent(".\(outputURL.lastPathComponent).\(UUID().uuidString).tmp")
+        var isDirectory: ObjCBool = false
+        let outputExists = fileManager.fileExists(atPath: outputURL.path, isDirectory: &isDirectory)
+        guard !outputExists || isDirectory.boolValue else {
+            throw CocoaError(
+                .fileWriteFileExists,
+                userInfo: [NSLocalizedDescriptionKey: "A non-package .dnt file already exists at \(outputURL.path)."]
+            )
+        }
+        let packageURL: URL
+        let installsNewPackage = !outputExists
 
-        defer {
-            try? fileManager.removeItem(at: stagingDirectory)
-            try? fileManager.removeItem(at: temporaryArchive)
+        if installsNewPackage {
+            packageURL = outputURL.deletingLastPathComponent()
+                .appendingPathComponent(".\(outputURL.lastPathComponent).\(UUID().uuidString).tmp", isDirectory: true)
+            try fileManager.createDirectory(at: packageURL, withIntermediateDirectories: true)
+        } else {
+            packageURL = outputURL
         }
 
-        try fileManager.createDirectory(at: assetsDirectory, withIntermediateDirectories: true)
+        do {
+            let assetsDirectory = packageURL.appendingPathComponent(assetsDirectoryName, isDirectory: true)
+            try fileManager.createDirectory(at: assetsDirectory, withIntermediateDirectories: true)
+            try installBundledTemplates(in: packageURL)
 
-        var savedProject = project
-        savedProject.formatVersion = DistributionProject.currentFormatVersion
-        savedProject.targetRelativePath = relativeTargetPath(for: appURL)
-        for kind in DistributionAssetKind.allCases {
-            guard let sourceURL = assetSources[kind] else {
-                setAssetName(nil, kind: kind, project: &savedProject)
-                continue
+            var savedProject = project
+            savedProject.formatVersion = DistributionProject.currentFormatVersion
+            savedProject.targetRelativePath = relativeTargetPath(for: appURL)
+            for kind in DistributionAssetKind.allCases {
+                guard let sourceURL = assetSources[kind] else {
+                    removeStoredAssets(for: kind, from: assetsDirectory)
+                    setAssetName(nil, kind: kind, project: &savedProject)
+                    continue
+                }
+
+                let pathExtension = sourceURL.pathExtension.lowercased()
+                let fileName = kind.archiveBaseName + (pathExtension.isEmpty ? "" : ".\(pathExtension)")
+                let destinationURL = assetsDirectory.appendingPathComponent(fileName)
+                if sourceURL.standardizedFileURL != destinationURL.standardizedFileURL {
+                    removeStoredAssets(for: kind, from: assetsDirectory)
+                    try fileManager.copyItem(at: sourceURL, to: destinationURL)
+                }
+                setAssetName(fileName, kind: kind, project: &savedProject)
             }
 
-            let fileName = kind.archiveBaseName + "." + sourceURL.pathExtension.lowercased()
-            let destinationURL = assetsDirectory.appendingPathComponent(fileName)
-            try fileManager.copyItem(at: sourceURL, to: destinationURL)
-            setAssetName(fileName, kind: kind, project: &savedProject)
-        }
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let manifestData = try encoder.encode(savedProject)
+            try manifestData.write(
+                to: packageURL.appendingPathComponent(manifestName),
+                options: .atomic
+            )
 
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        let manifestData = try encoder.encode(savedProject)
-        try manifestData.write(to: stagingDirectory.appendingPathComponent(manifestName), options: .atomic)
-
-        let result = try ShellManager.shared.runSync(
-            executable: "/usr/bin/ditto",
-            arguments: ["-c", "-k", "--sequesterRsrc", stagingDirectory.path, temporaryArchive.path]
-        )
-        guard result.status == 0 else {
-            throw CocoaError(.fileWriteUnknown, userInfo: [NSLocalizedDescriptionKey: result.output])
-        }
-
-        if fileManager.fileExists(atPath: outputURL.path) {
-            _ = try fileManager.replaceItemAt(outputURL, withItemAt: temporaryArchive)
-        } else {
-            try fileManager.moveItem(at: temporaryArchive, to: outputURL)
+            if installsNewPackage {
+                try fileManager.moveItem(at: packageURL, to: outputURL)
+            }
+        } catch {
+            if installsNewPackage {
+                try? fileManager.removeItem(at: packageURL)
+            }
+            throw error
         }
         return outputURL
+    }
+
+    public static func templateURL(named fileName: String, in archiveURL: URL) throws -> URL {
+        guard templateFileNames.contains(fileName) else {
+            throw CocoaError(.fileReadInvalidFileName)
+        }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: archiveURL.path, isDirectory: &isDirectory),
+              isDirectory.boolValue else {
+            throw CocoaError(.fileReadUnsupportedScheme)
+        }
+        let url = archiveURL
+            .appendingPathComponent(templatesDirectoryName, isDirectory: true)
+            .appendingPathComponent(fileName)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+        return url
+    }
+
+    public static func dmgTemplateName(
+        for settings: DiskImageSettings,
+        canUseInstallerPackage: Bool = true
+    ) -> String? {
+        let singleIcon = (settings.includeInstallerPackage && canUseInstallerPackage)
+            || !settings.includeApplicationsLink
+        switch settings.layoutTemplate {
+        case .template1: return singleIcon ? "DMG-BG-TEMP0.psd" : "DMG-BG-TEMP1.psd"
+        case .template2: return "DMG-BG-TEMP2.psd"
+        case .custom: return nil
+        }
     }
 
     /// Stores target locations relative to the user's home directory so a project
@@ -402,39 +457,82 @@ public enum DistributionProjectArchive {
             throw CocoaError(.fileNoSuchFile)
         }
 
-        let extractionDirectory = fileManager.temporaryDirectory
-            .appendingPathComponent("dnt-load-\(UUID().uuidString)", isDirectory: true)
-        try fileManager.createDirectory(at: extractionDirectory, withIntermediateDirectories: true)
-
-        do {
-            let result = try ShellManager.shared.runSync(
-                executable: "/usr/bin/ditto",
-                arguments: ["-x", "-k", archiveURL.path, extractionDirectory.path]
+        var isDirectory: ObjCBool = false
+        fileManager.fileExists(atPath: archiveURL.path, isDirectory: &isDirectory)
+        guard isDirectory.boolValue else {
+            throw CocoaError(
+                .fileReadUnsupportedScheme,
+                userInfo: [NSLocalizedDescriptionKey: "This .dnt file is not a project package."]
             )
-            guard result.status == 0 else {
-                throw CocoaError(.fileReadCorruptFile, userInfo: [NSLocalizedDescriptionKey: result.output])
-            }
+        }
+        return try loadProject(from: archiveURL)
+    }
 
-            let manifestURL = extractionDirectory.appendingPathComponent(manifestName)
-            let project = try JSONDecoder().decode(DistributionProject.self, from: Data(contentsOf: manifestURL))
-            guard project.formatVersion <= DistributionProject.currentFormatVersion else {
-                throw CocoaError(.fileReadUnsupportedScheme)
-            }
+    private static func loadProject(from directory: URL) throws -> LoadedDistributionProject {
+        let manifestURL = directory.appendingPathComponent(manifestName)
+        let project = try JSONDecoder().decode(DistributionProject.self, from: Data(contentsOf: manifestURL))
+        guard project.formatVersion == DistributionProject.currentFormatVersion else {
+            throw CocoaError(.fileReadUnsupportedScheme)
+        }
 
-            var assets: [DistributionAssetKind: URL] = [:]
-            for kind in DistributionAssetKind.allCases {
-                guard let name = assetName(kind: kind, project: project) else { continue }
-                let assetURL = extractionDirectory
-                    .appendingPathComponent(assetsDirectoryName, isDirectory: true)
-                    .appendingPathComponent(name)
-                if fileManager.fileExists(atPath: assetURL.path) {
-                    assets[kind] = assetURL
-                }
+        var assets: [DistributionAssetKind: URL] = [:]
+        for kind in DistributionAssetKind.allCases {
+            guard let name = assetName(kind: kind, project: project),
+                  name == URL(fileURLWithPath: name).lastPathComponent else { continue }
+            let assetURL = directory
+                .appendingPathComponent(assetsDirectoryName, isDirectory: true)
+                .appendingPathComponent(name)
+            if FileManager.default.fileExists(atPath: assetURL.path) {
+                assets[kind] = assetURL
             }
-            return LoadedDistributionProject(project: project, assets: assets, extractionDirectory: extractionDirectory)
-        } catch {
-            try? fileManager.removeItem(at: extractionDirectory)
-            throw error
+        }
+        return LoadedDistributionProject(
+            project: project,
+            assets: assets,
+            projectDirectory: directory
+        )
+    }
+
+    private static func installBundledTemplates(in packageURL: URL) throws {
+        let fileManager = FileManager.default
+        let templatesDirectory = packageURL.appendingPathComponent(templatesDirectoryName, isDirectory: true)
+        try fileManager.createDirectory(at: templatesDirectory, withIntermediateDirectories: true)
+
+        for fileName in templateFileNames {
+            let destinationURL = templatesDirectory.appendingPathComponent(fileName)
+            if fileManager.fileExists(atPath: destinationURL.path) { continue }
+            guard let sourceURL = bundledTemplateURL(named: fileName) else {
+                throw CocoaError(.fileNoSuchFile, userInfo: [NSLocalizedDescriptionKey: "Missing bundled template: \(fileName)"])
+            }
+            try fileManager.copyItem(at: sourceURL, to: destinationURL)
+            try fileManager.setAttributes([.posixPermissions: 0o644], ofItemAtPath: destinationURL.path)
+        }
+    }
+
+    private static func bundledTemplateURL(named fileName: String) -> URL? {
+        let name = (fileName as NSString).deletingPathExtension
+        let pathExtension = (fileName as NSString).pathExtension
+        if let bundledURL = Bundle.main.url(
+            forResource: name,
+            withExtension: pathExtension,
+            subdirectory: templatesDirectoryName
+        ) {
+            return bundledURL
+        }
+
+        let developmentURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(templatesDirectoryName, isDirectory: true)
+            .appendingPathComponent(fileName)
+        return FileManager.default.fileExists(atPath: developmentURL.path) ? developmentURL : nil
+    }
+
+    private static func removeStoredAssets(for kind: DistributionAssetKind, from assetsDirectory: URL) {
+        guard let urls = try? FileManager.default.contentsOfDirectory(
+            at: assetsDirectory,
+            includingPropertiesForKeys: nil
+        ) else { return }
+        for url in urls where url.deletingPathExtension().lastPathComponent == kind.archiveBaseName {
+            try? FileManager.default.removeItem(at: url)
         }
     }
 

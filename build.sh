@@ -132,6 +132,8 @@ cat <<EOF > "$APP_BUNDLE/Contents/Info.plist"
             <string>DKST Notary Project</string>
             <key>CFBundleTypeRole</key>
             <string>Editor</string>
+            <key>LSTypeIsPackage</key>
+            <true/>
             <key>LSHandlerRank</key>
             <string>Owner</string>
             <key>LSItemContentTypes</key>
@@ -155,7 +157,7 @@ cat <<EOF > "$APP_BUNDLE/Contents/Info.plist"
             <string>DKST Notary Project</string>
             <key>UTTypeConformsTo</key>
             <array>
-                <string>public.data</string>
+                <string>com.apple.package</string>
             </array>
             <key>UTTypeTagSpecification</key>
             <dict>

@@ -59,7 +59,6 @@ struct NotaryView: View {
     
     @State private var distributionProject = DistributionProject()
     @State private var distributionAssets: [DistributionAssetKind: URL] = [:]
-    @State private var extractedProjectDirectory: URL?
     @State private var projectSaveTask: Task<Void, Never>?
     @State private var projectIsReady = false
     @State private var hasProjectArchive = false
@@ -70,6 +69,8 @@ struct NotaryView: View {
     @State private var pendingProjectTargetRelink = false
     @State private var activeProjectArchiveURL: URL?
     @State private var lastHandledDocumentRequestID: UUID?
+    @State private var toastMessage: String?
+    @State private var toastTask: Task<Void, Never>?
     
     // Credentials selection
     @State private var credentialType: CredentialType = .keychainProfile
@@ -137,6 +138,19 @@ struct NotaryView: View {
         }
         .onReceive(documentOpenCoordinator.$request) { request in
             handlePendingDocumentRequest(request)
+        }
+        .overlay(alignment: .top) {
+            if let toastMessage {
+                Label(toastMessage, systemImage: "square.and.arrow.down")
+                    .font(.system(size: 11, weight: .medium))
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 9)
+                    .background(.regularMaterial, in: Capsule())
+                    .shadow(color: .black.opacity(0.18), radius: 8, y: 3)
+                    .padding(.top, 12)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                    .allowsHitTesting(false)
+            }
         }
     }
     
@@ -391,7 +405,8 @@ struct NotaryView: View {
                             settings: $distributionProject.installer,
                             backgroundURL: distributionAssets[.pkgBackground],
                             chooseBackground: { selectAsset(.pkgBackground) },
-                            removeBackground: { removeAsset(.pkgBackground) }
+                            removeBackground: { removeAsset(.pkgBackground) },
+                            editTemplate: openProjectTemplate
                         )
                     }
                     .padding(.leading, 12)
@@ -437,7 +452,8 @@ struct NotaryView: View {
                         chooseBackground: { selectAsset(.dmgBackground) },
                         removeBackground: { removeAsset(.dmgBackground) },
                         chooseVolumeIcon: { selectAsset(.dmgVolumeIcon) },
-                        removeVolumeIcon: { removeAsset(.dmgVolumeIcon) }
+                        removeVolumeIcon: { removeAsset(.dmgVolumeIcon) },
+                        editTemplate: openProjectTemplate
                     )
                     .transition(.opacity)
                 }
@@ -817,11 +833,6 @@ struct NotaryView: View {
         projectStatus = ""
         activeProjectArchiveURL = nil
 
-        if let extractedProjectDirectory {
-            try? FileManager.default.removeItem(at: extractedProjectDirectory)
-            self.extractedProjectDirectory = nil
-        }
-
         guard let file else {
             distributionProject = DistributionProject()
             return
@@ -843,7 +854,6 @@ struct NotaryView: View {
             if let loaded {
                 distributionProject = loaded.project
                 distributionAssets = loaded.assets
-                extractedProjectDirectory = loaded.extractionDirectory
                 hasProjectArchive = true
                 let loadedArchiveURL = projectArchiveURL ?? DistributionProjectArchive.archiveURL(for: file)
                 activeProjectArchiveURL = loadedArchiveURL
@@ -881,14 +891,9 @@ struct NotaryView: View {
             service.appendLog("Project open error: \(error.localizedDescription)")
             return
         }
-        defer { try? FileManager.default.removeItem(at: loadedProject.extractionDirectory) }
-
         let savedTargetURL = DistributionProjectArchive.targetURL(for: loadedProject.project)
-        let targetURL: URL?
-        if let savedTargetURL {
-            targetURL = isSupportedProjectTarget(savedTargetURL) ? savedTargetURL : nil
-        } else {
-            targetURL = legacyTargetURL(for: archiveURL)
+        let targetURL = savedTargetURL.flatMap { savedURL in
+            isSupportedProjectTarget(savedURL) ? savedURL : nil
         }
 
         if let targetURL {
@@ -896,14 +901,6 @@ struct NotaryView: View {
         } else {
             chooseProjectTarget(for: archiveURL, expectedTargetURL: savedTargetURL)
         }
-    }
-
-    private func legacyTargetURL(for archiveURL: URL) -> URL? {
-        let targetName = archiveURL.deletingPathExtension().lastPathComponent
-        let directory = archiveURL.deletingLastPathComponent()
-        let appTargetURL = directory.appendingPathComponent(targetName).appendingPathExtension("app")
-        let packageTargetURL = directory.appendingPathComponent(targetName).appendingPathExtension("pkg")
-        return [appTargetURL, packageTargetURL].first(where: isSupportedProjectTarget)
     }
 
     private func isSupportedProjectTarget(_ url: URL) -> Bool {
@@ -1015,7 +1012,8 @@ struct NotaryView: View {
         }
     }
 
-    private func saveDistributionProject(for appURL: URL) {
+    @discardableResult
+    private func saveDistributionProject(for appURL: URL) -> URL? {
         do {
             let url = try DistributionProjectArchive.save(
                 distributionProject,
@@ -1026,9 +1024,58 @@ struct NotaryView: View {
             activeProjectArchiveURL = url
             hasProjectArchive = true
             projectStatus = "Saved \(url.lastPathComponent)"
+            return url
         } catch {
             projectStatus = "Project save failed"
             service.appendLog("Project save error: \(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    private func openProjectTemplate(_ fileName: String) {
+        guard let targetURL = selectedFile,
+              targetURL.pathExtension.lowercased() == "app" else { return }
+
+        projectSaveTask?.cancel()
+        if fileName == DistributionProjectArchive.pkgTemplateName {
+            distributionAssets[.pkgBackground] = nil
+            distributionProject.installer.backgroundAssetName = nil
+        } else {
+            distributionAssets[.dmgBackground] = nil
+            distributionProject.diskImage.backgroundAssetName = nil
+        }
+        saveDistributionProject(for: targetURL)
+        guard let archiveURL = activeProjectArchiveURL else { return }
+
+        do {
+            let templateURL = try DistributionProjectArchive.templateURL(
+                named: fileName,
+                in: archiveURL
+            )
+            guard NSWorkspace.shared.open(templateURL) else {
+                throw CocoaError(.fileNoSuchFile)
+            }
+            showToast("Remember to save your PSD changes before building.")
+        } catch {
+            showProjectAlert(
+                title: "Unable to Open Template",
+                message: error.localizedDescription
+            )
+            service.appendLog("Template open error: \(error.localizedDescription)")
+        }
+    }
+
+    private func showToast(_ message: String) {
+        toastTask?.cancel()
+        withAnimation(.easeOut(duration: 0.2)) {
+            toastMessage = message
+        }
+        toastTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 3_500_000_000)
+            guard !Task.isCancelled else { return }
+            withAnimation(.easeIn(duration: 0.2)) {
+                toastMessage = nil
+            }
         }
     }
 
@@ -1149,10 +1196,43 @@ struct NotaryView: View {
 
         if file.pathExtension.lowercased() == "app", packageToPkg || packageToDmg || packageToZip {
             projectSaveTask?.cancel()
-            saveDistributionProject(for: file)
+            guard saveDistributionProject(for: file) != nil else { return }
         }
+
+        let usesProjectPSD = (packageToPkg && distributionAssets[.pkgBackground] == nil)
+            || (packageToDmg
+                && distributionAssets[.dmgBackground] == nil
+                && distributionProject.diskImage.layoutTemplate != .custom)
+        if usesProjectPSD {
+            showToast("Remember to save your PSD changes before building.")
+        }
+
+        let project = distributionProject
+        let assets = distributionAssets
+        let archiveURL = activeProjectArchiveURL
         
         Task {
+            let preparedAssets: PreparedDistributionAssets
+            do {
+                preparedAssets = try DistributionArtworkRenderer.prepare(
+                    project: project,
+                    assets: assets,
+                    projectArchiveURL: archiveURL
+                )
+            } catch {
+                showProjectAlert(
+                    title: "Unable to Prepare Background Artwork",
+                    message: error.localizedDescription
+                )
+                service.appendLog("Background artwork error: \(error.localizedDescription)")
+                return
+            }
+            defer {
+                if let temporaryDirectory = preparedAssets.temporaryDirectory {
+                    try? FileManager.default.removeItem(at: temporaryDirectory)
+                }
+            }
+
             await service.startWorkflow(
                 fileUrl: file,
                 signAppIdentity: signAppBundle ? selectedAppIdentity : nil,
@@ -1160,8 +1240,8 @@ struct NotaryView: View {
                 signPkgIdentity: shouldSignInstallerPackage ? selectedPkgIdentity : nil,
                 packageToDmg: packageToDmg,
                 packageToZip: packageToZip,
-                distributionProject: distributionProject,
-                distributionAssets: distributionAssets,
+                distributionProject: project,
+                distributionAssets: preparedAssets.assets,
                 performNotarization: shouldPerformNotarization,
                 credentialType: credentialType,
                 keychainProfile: selectedProfile,
