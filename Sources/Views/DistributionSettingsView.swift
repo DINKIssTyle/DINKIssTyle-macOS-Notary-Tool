@@ -1,11 +1,30 @@
 import AppKit
 import SwiftUI
 
+private enum InstallerPageKind: String, Identifiable {
+    case welcome
+    case readMe
+    case license
+    case conclusion
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .welcome: return "Welcome"
+        case .readMe: return "Read Me"
+        case .license: return "License"
+        case .conclusion: return "Conclusion"
+        }
+    }
+}
+
 struct InstallerCustomizationView: View {
     @Binding var settings: InstallerSettings
     let backgroundURL: URL?
     let chooseBackground: () -> Void
     let removeBackground: () -> Void
+    @State private var editingPage: InstallerPageKind?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -24,15 +43,27 @@ struct InstallerCustomizationView: View {
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(.secondary)
 
-            Text("Rich Text Format is supported. You can paste formatted RTF content into the fields below.")
+            Text("RTF and RTFD are supported. Paste rich text with embedded images into the fields below.")
                 .font(.system(size: 9))
                 .foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            installerPage("Welcome", isOn: $settings.showWelcome, text: $settings.welcomeText, rtfData: $settings.welcomeRTF)
-            installerPage("Read Me", isOn: $settings.showReadMe, text: $settings.readMeText, rtfData: $settings.readMeRTF)
-            installerPage("License", isOn: $settings.showLicense, text: $settings.licenseText, rtfData: $settings.licenseRTF)
-            installerPage("Conclusion", isOn: $settings.showConclusion, text: $settings.conclusionText, rtfData: $settings.conclusionRTF)
+            installerPage(
+                .welcome, isOn: $settings.showWelcome,
+                text: $settings.welcomeText, rtfData: $settings.welcomeRTF
+            )
+            installerPage(
+                .readMe, isOn: $settings.showReadMe,
+                text: $settings.readMeText, rtfData: $settings.readMeRTF
+            )
+            installerPage(
+                .license, isOn: $settings.showLicense,
+                text: $settings.licenseText, rtfData: $settings.licenseRTF
+            )
+            installerPage(
+                .conclusion, isOn: $settings.showConclusion,
+                text: $settings.conclusionText, rtfData: $settings.conclusionRTF
+            )
 
             Divider()
             AssetPickerRow(
@@ -87,25 +118,78 @@ struct InstallerCustomizationView: View {
         }
         .padding(.leading, 12)
         .padding(.top, 2)
+        .sheet(item: $editingPage) { page in
+            InstallerPageEditorSheet(
+                pageTitle: page.title,
+                initialText: pageText(page),
+                initialRTFData: pageRTFData(page)
+            ) { text, rtfData in
+                savePage(page, text: text, rtfData: rtfData)
+            }
+        }
     }
 
     @ViewBuilder
     private func installerPage(
-        _ title: String,
+        _ page: InstallerPageKind,
         isOn: Binding<Bool>,
         text: Binding<String>,
         rtfData: Binding<Data?>
     ) -> some View {
         VStack(alignment: .leading, spacing: 5) {
-            Toggle(title, isOn: isOn)
-                .font(.system(size: 10, weight: .medium))
+            HStack {
+                Toggle(page.title, isOn: isOn)
+                    .font(.system(size: 10, weight: .medium))
+                Spacer()
+                if isOn.wrappedValue {
+                    Button("Edit…") {
+                        editingPage = page
+                    }
+                    .controlSize(.small)
+                }
+            }
             if isOn.wrappedValue {
-                RichTextEditor(text: text, rtfData: rtfData)
-                    .frame(height: title == "License" ? 90 : 62)
+                RichTextEditor(text: text, rtfData: rtfData, isEditable: false)
+                    .frame(height: page == .license ? 90 : 62)
                     .background(Color(NSColor.textBackgroundColor))
                     .clipShape(RoundedRectangle(cornerRadius: 5))
                     .overlay(RoundedRectangle(cornerRadius: 5).stroke(Color.secondary.opacity(0.18)))
             }
+        }
+    }
+
+    private func pageText(_ page: InstallerPageKind) -> String {
+        switch page {
+        case .welcome: return settings.welcomeText
+        case .readMe: return settings.readMeText
+        case .license: return settings.licenseText
+        case .conclusion: return settings.conclusionText
+        }
+    }
+
+    private func pageRTFData(_ page: InstallerPageKind) -> Data? {
+        switch page {
+        case .welcome: return settings.welcomeRTF
+        case .readMe: return settings.readMeRTF
+        case .license: return settings.licenseRTF
+        case .conclusion: return settings.conclusionRTF
+        }
+    }
+
+    private func savePage(_ page: InstallerPageKind, text: String, rtfData: Data?) {
+        switch page {
+        case .welcome:
+            settings.welcomeText = text
+            settings.welcomeRTF = rtfData
+        case .readMe:
+            settings.readMeText = text
+            settings.readMeRTF = rtfData
+        case .license:
+            settings.licenseText = text
+            settings.licenseRTF = rtfData
+        case .conclusion:
+            settings.conclusionText = text
+            settings.conclusionRTF = rtfData
         }
     }
 
@@ -139,6 +223,63 @@ struct InstallerCustomizationView: View {
         if let value = value as? InstallerBackgroundScaling { return value.title }
         if let value = value as? InstallerInstallationDomain { return value.title }
         return String(describing: value)
+    }
+}
+
+private struct InstallerPageEditorSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let pageTitle: String
+    let onSave: (String, Data?) -> Void
+    @State private var draftText: String
+    @State private var draftRTFData: Data?
+
+    init(
+        pageTitle: String,
+        initialText: String,
+        initialRTFData: Data?,
+        onSave: @escaping (String, Data?) -> Void
+    ) {
+        self.pageTitle = pageTitle
+        self.onSave = onSave
+        _draftText = State(initialValue: initialText)
+        _draftRTFData = State(initialValue: initialRTFData)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Edit \(pageTitle)")
+                .font(.title3)
+                .fontWeight(.semibold)
+
+            Text("RTF and RTFD are supported, including formatted text and embedded images.")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+
+            RichTextEditor(text: $draftText, rtfData: $draftRTFData)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color(NSColor.textBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: 7))
+                .overlay(RoundedRectangle(cornerRadius: 7).stroke(Color.secondary.opacity(0.22)))
+
+            Divider()
+
+            HStack {
+                Spacer()
+                Button("Cancel") {
+                    dismiss()
+                }
+                .keyboardShortcut(.cancelAction)
+
+                Button("Save") {
+                    onSave(draftText, draftRTFData)
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+        .frame(minWidth: 720, idealWidth: 780, minHeight: 500, idealHeight: 560)
+        .interactiveDismissDisabled()
     }
 }
 

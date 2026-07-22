@@ -4,6 +4,59 @@ import XCTest
 @testable import DKST_macOS_Notary
 
 final class DistributionProjectTests: XCTestCase {
+    func testWorkflowButtonTitlesReflectSigningNotarizationAndDistribution() {
+        XCTAssertEqual(
+            WorkflowActionPresentation.title(
+                isApp: true,
+                signApp: true,
+                notarize: false,
+                hasDistribution: false,
+                signInstaller: false
+            ),
+            "Sign App"
+        )
+        XCTAssertEqual(
+            WorkflowActionPresentation.title(
+                isApp: true,
+                signApp: false,
+                notarize: true,
+                hasDistribution: false,
+                signInstaller: false
+            ),
+            "Notarize App"
+        )
+        XCTAssertEqual(
+            WorkflowActionPresentation.title(
+                isApp: true,
+                signApp: true,
+                notarize: true,
+                hasDistribution: true,
+                signInstaller: false
+            ),
+            "Sign, Notarize & Create Distribution"
+        )
+        XCTAssertEqual(
+            WorkflowActionPresentation.title(
+                isApp: true,
+                signApp: false,
+                notarize: false,
+                hasDistribution: true,
+                signInstaller: true
+            ),
+            "Create Signed Distribution"
+        )
+        XCTAssertEqual(
+            WorkflowActionPresentation.title(
+                isApp: false,
+                signApp: false,
+                notarize: false,
+                hasDistribution: false,
+                signInstaller: false
+            ),
+            "Choose an Action"
+        )
+    }
+
     func testOlderInstallerSettingsUseSystemApplicationsDefaults() throws {
         let settings = try JSONDecoder().decode(InstallerSettings.self, from: Data("{}".utf8))
         XCTAssertEqual(settings.installationDomain, .localSystem)
@@ -106,6 +159,46 @@ final class DistributionProjectTests: XCTestCase {
         XCTAssertTrue(fileManager.fileExists(atPath: try XCTUnwrap(loaded.assets[.dmgBackground]).path))
     }
 
+    func testArchiveCanBeLoadedDirectlyFromAStoredCopy() throws {
+        let fileManager = FileManager.default
+        let directory = fileManager.temporaryDirectory
+            .appendingPathComponent("dnt-portable-test-\(UUID().uuidString)", isDirectory: true)
+        let buildDirectory = directory.appendingPathComponent("Build", isDirectory: true)
+        let storageDirectory = directory.appendingPathComponent("Projects", isDirectory: true)
+        let appURL = buildDirectory.appendingPathComponent("Portable App.app", isDirectory: true)
+        defer { try? fileManager.removeItem(at: directory) }
+
+        try fileManager.createDirectory(at: appURL, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: storageDirectory, withIntermediateDirectories: true)
+
+        var project = DistributionProject()
+        project.buildDiskImage = true
+        project.diskImage.volumeName = "Portable Volume"
+        let adjacentArchiveURL = try DistributionProjectArchive.save(project, for: appURL, assetSources: [:])
+        let storedArchiveURL = storageDirectory.appendingPathComponent("Portable App.dnt")
+        try fileManager.copyItem(at: adjacentArchiveURL, to: storedArchiveURL)
+
+        let loaded = try DistributionProjectArchive.load(from: storedArchiveURL)
+        defer { try? fileManager.removeItem(at: loaded.extractionDirectory) }
+        XCTAssertEqual(loaded.project.diskImage.volumeName, "Portable Volume")
+        XCTAssertTrue(loaded.project.buildDiskImage)
+    }
+
+    func testDocumentOpenCoordinatorAcceptsOnlyDNTFiles() {
+        let coordinator = DocumentOpenCoordinator()
+        coordinator.open(URL(fileURLWithPath: "/tmp/Example.app"))
+        XCTAssertNil(coordinator.request)
+
+        coordinator.open(URL(fileURLWithPath: "/tmp/Example.dnt"))
+        let request = coordinator.request
+        XCTAssertEqual(request?.url.path, "/tmp/Example.dnt")
+
+        if let request {
+            coordinator.consume(request.id)
+        }
+        XCTAssertNil(coordinator.request)
+    }
+
     func testDSStoreWriterCreatesPortableFinderRecords() throws {
         let fileManager = FileManager.default
         let directory = fileManager.temporaryDirectory
@@ -202,6 +295,20 @@ final class DistributionProjectTests: XCTestCase {
         project.installer.version = "1.2.3"
         project.installer.showWelcome = true
         project.installer.welcomeText = "Welcome & install <safely>."
+        project.installer.showReadMe = true
+        project.installer.readMeText = "Read me with an embedded image"
+        let richReadMe = NSMutableAttributedString(string: "Embedded image: ")
+        let readMeAttachment = NSTextAttachment()
+        readMeAttachment.contents = try Data(
+            contentsOf: URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+                .appendingPathComponent("Sources/Resources/Appicon.png")
+        )
+        readMeAttachment.fileType = "public.png"
+        richReadMe.append(NSAttributedString(attachment: readMeAttachment))
+        project.installer.readMeRTF = try richReadMe.data(
+            from: NSRange(location: 0, length: richReadMe.length),
+            documentAttributes: [.documentType: NSAttributedString.DocumentType.rtfd]
+        )
         project.installer.showLicense = true
         project.installer.licenseText = "Styled license"
         let styledLicense = NSAttributedString(
@@ -257,6 +364,22 @@ final class DistributionProjectTests: XCTestCase {
             encoding: .utf8
         )
         XCTAssertTrue(distributionXML.contains(#"<license file="license.rtf" mime-type="text/rtf"/>"#), distributionXML)
+        XCTAssertTrue(distributionXML.contains(#"<readme file="readme.rtfd" uti="com.apple.rtfd"/>"#), distributionXML)
+        let packagedReadMeURL = expandedPackageURL
+            .appendingPathComponent("Resources", isDirectory: true)
+            .appendingPathComponent("readme.rtfd", isDirectory: true)
+        var isReadMeDirectory: ObjCBool = false
+        XCTAssertTrue(fileManager.fileExists(atPath: packagedReadMeURL.path, isDirectory: &isReadMeDirectory))
+        XCTAssertTrue(isReadMeDirectory.boolValue)
+        let packagedReadMeWrapper = try FileWrapper(url: packagedReadMeURL, options: .immediate)
+        let packagedReadMeData = try XCTUnwrap(packagedReadMeWrapper.serializedRepresentation)
+        let packagedReadMe = try NSAttributedString(
+            data: packagedReadMeData,
+            options: [.documentType: NSAttributedString.DocumentType.rtfd],
+            documentAttributes: nil
+        )
+        XCTAssertEqual(packagedReadMe.string, "Embedded image: \u{fffc}")
+        XCTAssertNotNil(packagedReadMe.attribute(.attachment, at: packagedReadMe.length - 1, effectiveRange: nil))
         let licenseResourceURL = try XCTUnwrap(
             fileManager.enumerator(at: expandedPackageURL, includingPropertiesForKeys: nil)?
                 .compactMap { $0 as? URL }
@@ -289,6 +412,7 @@ final class DistributionProjectTests: XCTestCase {
         )
         XCTAssertEqual(nestedVerification.status, 0, nestedVerification.output)
         XCTAssertTrue(service.logOutput.contains("Signing: Contents/Resources/Settings.app"), service.logOutput)
+        XCTAssertTrue(service.logOutput.contains("Embedded 1 RTFD Installer page resource(s)."), service.logOutput)
         XCTAssertEqual(service.currentStep, "Distribution Build Completed", service.logOutput)
 
         let nestedExecutable = try FileHandle(forWritingTo: nestedExecutableURL)

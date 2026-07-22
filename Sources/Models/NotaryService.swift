@@ -20,6 +20,17 @@ private enum DistributionBuildError: LocalizedError {
     }
 }
 
+private enum InstallerPageDocument {
+    case rtf(Data)
+    case rtfd(Data)
+}
+
+private struct InstallerRTFDPage {
+    let placeholderName: String
+    let resourceName: String
+    let data: Data
+}
+
 public enum VerificationStatus: String, Sendable, Codable {
     case idle
     case running
@@ -177,8 +188,22 @@ public class NotaryService: ObservableObject {
         let fileExtension = fileUrl.pathExtension.lowercased()
         let appName = fileUrl.deletingPathExtension().lastPathComponent
         let parentDir = fileUrl.deletingLastPathComponent()
+        let performsCodeSigning = fileExtension == "app" && !(signAppIdentity?.isEmpty ?? true)
+        let buildsDistribution = packageToPkg || packageToDmg || packageToZip
         
-        appendLog(performNotarization ? "=== Starting Notarization Workflow ===" : "=== Starting Distribution Build ===")
+        let workflowName: String
+        if performNotarization {
+            workflowName = "Notarization Workflow"
+        } else if performsCodeSigning && buildsDistribution {
+            workflowName = "Code Signing & Distribution Workflow"
+        } else if performsCodeSigning {
+            workflowName = "Code Signing Workflow"
+        } else if buildsDistribution {
+            workflowName = "Distribution Build"
+        } else {
+            workflowName = "Local Workflow"
+        }
+        appendLog("=== Starting \(workflowName) ===")
         appendLog("Target File: \(path)")
         
         let fileManager = FileManager.default
@@ -547,7 +572,7 @@ public class NotaryService: ObservableObject {
             let isPkgResult = workingTarget.hasSuffix(".pkg")
             await runVerificationChecks(targetPath: workingTarget, isPkg: isPkgResult)
         } else {
-            appendLog("\nSkipped: Security verification (distribution-only build)")
+            appendLog("\nSkipped: Apple notarization and notarization verification (disabled)")
         }
 
         progress = 1.0
@@ -558,9 +583,15 @@ public class NotaryService: ObservableObject {
         } else if distributionBuildHadError {
             currentStep = "Distribution Build Finished with Errors"
             appendLog("\n=== Distribution Build Finished with Errors ===")
-        } else {
+        } else if buildsDistribution {
             currentStep = "Distribution Build Completed"
             appendLog("\n=== Distribution Build Completed ===")
+        } else if performsCodeSigning {
+            currentStep = "Code Signing Completed"
+            appendLog("\n=== Code Signing Completed ===")
+        } else {
+            currentStep = "Local Workflow Completed"
+            appendLog("\n=== Local Workflow Completed ===")
         }
     }
 
@@ -723,70 +754,120 @@ public class NotaryService: ObservableObject {
             throw DistributionBuildError.commandFailed("pkgbuild", componentStatus)
         }
 
-        var presentationElements: [String] = []
+        var productPresentationElements: [String] = []
+        var finalPresentationElements: [String] = []
+        var rtfdPages: [InstallerRTFDPage] = []
+
+        func addInstallerPage(tag: String, baseName: String, data: Data?, fallbackText: String) throws {
+            let document = try installerPageDocument(data, fallbackText: fallbackText)
+            switch document {
+            case let .rtf(rtfData):
+                let resourceName = "\(baseName).rtf"
+                try rtfData.write(to: resourcesDirectory.appendingPathComponent(resourceName), options: .atomic)
+                let element = "<\(tag) file=\"\(resourceName)\" mime-type=\"text/rtf\"/>"
+                productPresentationElements.append(element)
+                finalPresentationElements.append(element)
+            case let .rtfd(rtfdData):
+                // productbuild still rejects RTFD directory packages passed through --resources.
+                // Build with a temporary RTF, then replace it after expanding the unsigned product.
+                let placeholderName = "\(baseName)-rtfd-placeholder.rtf"
+                let resourceName = "\(baseName).rtfd"
+                let placeholderData = try installerRTFData(nil, fallbackText: fallbackText)
+                try placeholderData.write(
+                    to: resourcesDirectory.appendingPathComponent(placeholderName),
+                    options: .atomic
+                )
+                productPresentationElements.append(
+                    "<\(tag) file=\"\(placeholderName)\" mime-type=\"text/rtf\"/>"
+                )
+                finalPresentationElements.append(
+                    "<\(tag) file=\"\(resourceName)\" uti=\"com.apple.rtfd\"/>"
+                )
+                rtfdPages.append(
+                    InstallerRTFDPage(
+                        placeholderName: placeholderName,
+                        resourceName: resourceName,
+                        data: rtfdData
+                    )
+                )
+            }
+        }
+
         if settings.showWelcome {
-            try installerRTFData(settings.welcomeRTF, fallbackText: settings.welcomeText)
-                .write(to: resourcesDirectory.appendingPathComponent("welcome.rtf"), options: .atomic)
-            presentationElements.append(#"<welcome file="welcome.rtf" mime-type="text/rtf"/>"#)
+            try addInstallerPage(
+                tag: "welcome", baseName: "welcome",
+                data: settings.welcomeRTF, fallbackText: settings.welcomeText
+            )
         }
         if settings.showReadMe {
-            try installerRTFData(settings.readMeRTF, fallbackText: settings.readMeText)
-                .write(to: resourcesDirectory.appendingPathComponent("readme.rtf"), options: .atomic)
-            presentationElements.append(#"<readme file="readme.rtf" mime-type="text/rtf"/>"#)
+            try addInstallerPage(
+                tag: "readme", baseName: "readme",
+                data: settings.readMeRTF, fallbackText: settings.readMeText
+            )
         }
         if settings.showLicense {
-            try installerRTFData(settings.licenseRTF, fallbackText: settings.licenseText)
-                .write(to: resourcesDirectory.appendingPathComponent("license.rtf"), options: .atomic)
-            presentationElements.append(#"<license file="license.rtf" mime-type="text/rtf"/>"#)
+            try addInstallerPage(
+                tag: "license", baseName: "license",
+                data: settings.licenseRTF, fallbackText: settings.licenseText
+            )
         }
         if settings.showConclusion {
-            try installerRTFData(settings.conclusionRTF, fallbackText: settings.conclusionText)
-                .write(to: resourcesDirectory.appendingPathComponent("conclusion.rtf"), options: .atomic)
-            presentationElements.append(#"<conclusion file="conclusion.rtf" mime-type="text/rtf"/>"#)
+            try addInstallerPage(
+                tag: "conclusion", baseName: "conclusion",
+                data: settings.conclusionRTF, fallbackText: settings.conclusionText
+            )
         }
 
         if let backgroundURL = assets[.pkgBackground] {
             let fileName = "installer-background.\(backgroundURL.pathExtension.lowercased())"
             try fileManager.copyItem(at: backgroundURL, to: resourcesDirectory.appendingPathComponent(fileName))
-            presentationElements.append(
+            let backgroundElement =
                 #"<background file="\#(xmlEscaped(fileName))" alignment="\#(settings.backgroundAlignment.rawValue)" scaling="\#(settings.backgroundScaling.rawValue)"/>"#
-            )
+            productPresentationElements.append(backgroundElement)
+            finalPresentationElements.append(backgroundElement)
         }
 
-        let distribution = """
-        <?xml version="1.0" encoding="utf-8"?>
-        <installer-gui-script minSpecVersion="2">
-            <title>\(xmlEscaped(title))</title>
-            <options customize="never" require-scripts="false" rootVolumeOnly="\(installsForCurrentUser ? "false" : "true")"/>
-            <domains enable_anywhere="false" enable_currentUserHome="\(installsForCurrentUser ? "true" : "false")" enable_localSystem="\(installsForCurrentUser ? "false" : "true")"/>
-            \(presentationElements.joined(separator: "\n    "))
-            <choices-outline>
-                <line choice="default">
-                    <line choice="app"/>
-                </line>
-            </choices-outline>
-            <choice id="default"/>
-            <choice id="app" visible="false">
-                <pkg-ref id="\(xmlEscaped(identifier))"/>
-            </choice>
-            <pkg-ref id="\(xmlEscaped(identifier))" version="\(xmlEscaped(version))" onConclusion="\(settings.conclusionAction.distributionValue)">component.pkg</pkg-ref>
-        </installer-gui-script>
-        """
-        try distribution.write(to: distributionURL, atomically: true, encoding: .utf8)
+        func distributionXML(presentationElements: [String]) -> String {
+            """
+            <?xml version="1.0" encoding="utf-8"?>
+            <installer-gui-script minSpecVersion="2">
+                <title>\(xmlEscaped(title))</title>
+                <options customize="never" require-scripts="false" rootVolumeOnly="\(installsForCurrentUser ? "false" : "true")"/>
+                <domains enable_anywhere="false" enable_currentUserHome="\(installsForCurrentUser ? "true" : "false")" enable_localSystem="\(installsForCurrentUser ? "false" : "true")"/>
+                \(presentationElements.joined(separator: "\n    "))
+                <choices-outline>
+                    <line choice="default">
+                        <line choice="app"/>
+                    </line>
+                </choices-outline>
+                <choice id="default"/>
+                <choice id="app" visible="false">
+                    <pkg-ref id="\(xmlEscaped(identifier))"/>
+                </choice>
+                <pkg-ref id="\(xmlEscaped(identifier))" version="\(xmlEscaped(version))" onConclusion="\(settings.conclusionAction.distributionValue)">component.pkg</pkg-ref>
+            </installer-gui-script>
+            """
+        }
+        try distributionXML(presentationElements: productPresentationElements)
+            .write(to: distributionURL, atomically: true, encoding: .utf8)
 
         if fileManager.fileExists(atPath: outputPath) {
             try fileManager.removeItem(atPath: outputPath)
         }
 
+        let requiresRTFDRepack = !rtfdPages.isEmpty
+        let initialProductURL = requiresRTFDRepack
+            ? buildDirectory.appendingPathComponent("initial-product.pkg")
+            : URL(fileURLWithPath: outputPath)
         var productArguments = [
             "--distribution", distributionURL.path,
             "--package-path", buildDirectory.path,
             "--resources", resourcesDirectory.path
         ]
-        if let signingIdentity, !signingIdentity.isEmpty {
+        if !requiresRTFDRepack, let signingIdentity, !signingIdentity.isEmpty {
             productArguments.append(contentsOf: ["--sign", signingIdentity, "--timestamp"])
         }
-        productArguments.append(outputPath)
+        productArguments.append(initialProductURL.path)
 
         appendLog("Building product archive with custom Installer presentation...")
         let productStatus = try await ShellManager.shared.runStream(
@@ -798,6 +879,67 @@ public class NotaryService: ObservableObject {
         }
         guard productStatus == 0 else {
             throw DistributionBuildError.commandFailed("productbuild", productStatus)
+        }
+
+        if requiresRTFDRepack {
+            appendLog("Embedding RTFD Installer page resources...")
+            let expandedURL = buildDirectory.appendingPathComponent("ExpandedProduct", isDirectory: true)
+            let expandStatus = try await runInstallerPackagingCommand(
+                executable: "/usr/sbin/pkgutil",
+                arguments: ["--expand", initialProductURL.path, expandedURL.path],
+                commandName: "pkgutil --expand"
+            )
+            guard expandStatus == 0 else {
+                throw DistributionBuildError.commandFailed("pkgutil --expand", expandStatus)
+            }
+
+            let expandedResourcesURL = expandedURL.appendingPathComponent("Resources", isDirectory: true)
+            for page in rtfdPages {
+                let placeholderURL = expandedResourcesURL.appendingPathComponent(page.placeholderName)
+                if fileManager.fileExists(atPath: placeholderURL.path) {
+                    try fileManager.removeItem(at: placeholderURL)
+                }
+                guard let wrapper = FileWrapper(serializedRepresentation: page.data), wrapper.isDirectory else {
+                    throw CocoaError(.fileReadCorruptFile, userInfo: [
+                        NSLocalizedDescriptionKey: "The \(page.resourceName) RTFD content is invalid."
+                    ])
+                }
+                try wrapper.write(
+                    to: expandedResourcesURL.appendingPathComponent(page.resourceName, isDirectory: true),
+                    options: .atomic,
+                    originalContentsURL: nil
+                )
+            }
+            try distributionXML(presentationElements: finalPresentationElements)
+                .write(
+                    to: expandedURL.appendingPathComponent("Distribution"),
+                    atomically: true,
+                    encoding: .utf8
+                )
+
+            let repackedURL = buildDirectory.appendingPathComponent("rtfd-product.pkg")
+            let flattenStatus = try await runInstallerPackagingCommand(
+                executable: "/usr/sbin/pkgutil",
+                arguments: ["--flatten", expandedURL.path, repackedURL.path],
+                commandName: "pkgutil --flatten"
+            )
+            guard flattenStatus == 0 else {
+                throw DistributionBuildError.commandFailed("pkgutil --flatten", flattenStatus)
+            }
+
+            if let signingIdentity, !signingIdentity.isEmpty {
+                let signStatus = try await runInstallerPackagingCommand(
+                    executable: "/usr/bin/productsign",
+                    arguments: ["--sign", signingIdentity, "--timestamp", repackedURL.path, outputPath],
+                    commandName: "productsign"
+                )
+                guard signStatus == 0 else {
+                    throw DistributionBuildError.commandFailed("productsign", signStatus)
+                }
+            } else {
+                try fileManager.moveItem(at: repackedURL, to: URL(fileURLWithPath: outputPath))
+            }
+            appendLog("Embedded \(rtfdPages.count) RTFD Installer page resource(s).")
         }
     }
 
@@ -1011,6 +1153,20 @@ public class NotaryService: ObservableObject {
         appendLog("Verified: Finder layout, assets, and volume metadata are present in the final DMG.")
     }
 
+    private func installerPageDocument(_ data: Data?, fallbackText: String) throws -> InstallerPageDocument {
+        if let data,
+           data.starts(with: Data("rtfd".utf8)),
+           FileWrapper(serializedRepresentation: data)?.isDirectory == true,
+           (try? NSAttributedString(
+               data: data,
+               options: [.documentType: NSAttributedString.DocumentType.rtfd],
+               documentAttributes: nil
+           )) != nil {
+            return .rtfd(data)
+        }
+        return .rtf(try installerRTFData(data, fallbackText: fallbackText))
+    }
+
     private func installerRTFData(_ rtfData: Data?, fallbackText: String) throws -> Data {
         if let rtfData,
            (try? NSAttributedString(
@@ -1029,6 +1185,20 @@ public class NotaryService: ObservableObject {
             from: NSRange(location: 0, length: attributed.length),
             documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf]
         )
+    }
+
+    private func runInstallerPackagingCommand(
+        executable: String,
+        arguments: [String],
+        commandName: String
+    ) async throws -> Int32 {
+        try await ShellManager.shared.runStream(
+            executable: executable,
+            arguments: arguments,
+            processId: activeProcessId
+        ) { [weak self] line in
+            Task { @MainActor in self?.appendLog("  \(commandName): \(line)") }
+        }
     }
 
     private func xmlEscaped(_ value: String) -> String {

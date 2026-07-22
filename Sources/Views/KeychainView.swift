@@ -36,7 +36,7 @@ struct KeychainView: View {
             
             Divider()
             
-            HSplitView {
+            EqualPanelSplitView {
                 // Left Panel: Form to Register Profile
                 ScrollView {
                     VStack(alignment: .leading, spacing: 18) {
@@ -159,8 +159,7 @@ struct KeychainView: View {
                     }
                     .padding(24)
                 }
-                .frame(width: AppLayout.workPanelWidth)
-                
+            } trailing: {
                 // Right Panel: Stored Profiles List
                 VStack(alignment: .leading, spacing: 0) {
                     Text("Saved Profiles (\(profiles.count))")
@@ -222,7 +221,7 @@ struct KeychainView: View {
                         .listStyle(.inset)
                     }
                 }
-                .frame(minWidth: 380, maxWidth: .infinity, maxHeight: .infinity)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .onAppear(perform: loadProfiles)

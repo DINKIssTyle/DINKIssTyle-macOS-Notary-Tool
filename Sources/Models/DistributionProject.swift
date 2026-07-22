@@ -353,6 +353,15 @@ public enum DistributionProjectArchive {
         let archiveURL = archiveURL(for: appURL)
         let fileManager = FileManager.default
         guard fileManager.fileExists(atPath: archiveURL.path) else { return nil }
+        return try load(from: archiveURL)
+    }
+
+    public static func load(from archiveURL: URL) throws -> LoadedDistributionProject {
+        let fileManager = FileManager.default
+        guard archiveURL.pathExtension.lowercased() == "dnt",
+              fileManager.fileExists(atPath: archiveURL.path) else {
+            throw CocoaError(.fileNoSuchFile)
+        }
 
         let extractionDirectory = fileManager.temporaryDirectory
             .appendingPathComponent("dnt-load-\(UUID().uuidString)", isDirectory: true)

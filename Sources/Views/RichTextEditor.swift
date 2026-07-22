@@ -4,6 +4,7 @@ import SwiftUI
 struct RichTextEditor: NSViewRepresentable {
     @Binding var text: String
     @Binding var rtfData: Data?
+    var isEditable = true
 
     func makeCoordinator() -> Coordinator {
         Coordinator(parent: self)
@@ -19,7 +20,9 @@ struct RichTextEditor: NSViewRepresentable {
         let contentSize = scrollView.contentSize
         textView.delegate = context.coordinator
         textView.isRichText = true
-        textView.importsGraphics = false
+        textView.importsGraphics = true
+        textView.isEditable = isEditable
+        textView.isSelectable = true
         textView.allowsUndo = true
         textView.isAutomaticLinkDetectionEnabled = true
         textView.isContinuousSpellCheckingEnabled = true
@@ -41,6 +44,7 @@ struct RichTextEditor: NSViewRepresentable {
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         context.coordinator.parent = self
         guard let textView = scrollView.documentView as? NSTextView else { return }
+        textView.isEditable = isEditable
         if rtfData != context.coordinator.lastRTFData || (rtfData == nil && textView.string != text) {
             context.coordinator.applyModel(to: textView, text: text, rtfData: rtfData)
         }
@@ -60,11 +64,7 @@ struct RichTextEditor: NSViewRepresentable {
             defer { isApplyingModel = false }
 
             if let rtfData,
-               let attributed = try? NSAttributedString(
-                   data: rtfData,
-                   options: [.documentType: NSAttributedString.DocumentType.rtf],
-                   documentAttributes: nil
-               ) {
+               let attributed = attributedString(from: rtfData) {
                 textView.textStorage?.setAttributedString(attributed)
                 lastRTFData = rtfData
             } else {
@@ -80,13 +80,36 @@ struct RichTextEditor: NSViewRepresentable {
         func textDidChange(_ notification: Notification) {
             guard !isApplyingModel, let textView = notification.object as? NSTextView else { return }
             let fullRange = NSRange(location: 0, length: textView.textStorage?.length ?? 0)
-            let data = textView.textStorage?.rtf(
+            var hasAttachments = false
+            textView.textStorage?.enumerateAttribute(.attachment, in: fullRange) { value, _, stop in
+                if value != nil {
+                    hasAttachments = true
+                    stop.pointee = true
+                }
+            }
+            let documentType: NSAttributedString.DocumentType = hasAttachments ? .rtfd : .rtf
+            let data = try? textView.textStorage?.data(
                 from: fullRange,
-                documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf]
+                documentAttributes: [.documentType: documentType]
             )
             lastRTFData = data
             parent.text = textView.string
             parent.rtfData = data
+        }
+
+        private func attributedString(from data: Data) -> NSAttributedString? {
+            let isRTFD = data.starts(with: Data("rtfd".utf8))
+            let types: [NSAttributedString.DocumentType] = isRTFD ? [.rtfd, .rtf] : [.rtf, .rtfd]
+            for type in types {
+                if let attributed = try? NSAttributedString(
+                    data: data,
+                    options: [.documentType: type],
+                    documentAttributes: nil
+                ) {
+                    return attributed
+                }
+            }
+            return nil
         }
     }
 }

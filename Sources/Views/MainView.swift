@@ -2,13 +2,48 @@ import SwiftUI
 
 enum AppLayout {
     static let navigationSidebarWidth: CGFloat = 240
-    static let workPanelWidth: CGFloat = 420
+    static let primaryActionWidth: CGFloat = 380
     static let workAreaMinimumWidth: CGFloat = 800
     static let windowMinimumWidth: CGFloat = 1060
 }
 
+struct EqualPanelSplitView<Leading: View, Trailing: View>: View {
+    @Environment(\.displayScale) private var displayScale
+    let leading: Leading
+    let trailing: Trailing
+
+    init(
+        @ViewBuilder leading: () -> Leading,
+        @ViewBuilder trailing: () -> Trailing
+    ) {
+        self.leading = leading()
+        self.trailing = trailing()
+    }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            leading
+                .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity)
+                .layoutPriority(1)
+
+            trailing
+                .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity)
+                .layoutPriority(1)
+                .overlay(alignment: .leading) {
+                    Rectangle()
+                        .fill(Color(NSColor.separatorColor))
+                        .frame(width: 1 / max(displayScale, 1))
+                        .frame(maxHeight: .infinity)
+                        .allowsHitTesting(false)
+                }
+        }
+    }
+}
+
 struct MainView: View {
+    @EnvironmentObject private var documentOpenCoordinator: DocumentOpenCoordinator
     @State private var selectedTab: Tab = .notarize
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
     
     enum Tab: String, CaseIterable, Identifiable {
         case notarize = "Notarize"
@@ -23,9 +58,22 @@ struct MainView: View {
             }
         }
     }
+
+    private var columnVisibilityWithoutAnimation: Binding<NavigationSplitViewVisibility> {
+        Binding(
+            get: { columnVisibility },
+            set: { newValue in
+                var transaction = Transaction()
+                transaction.disablesAnimations = true
+                withTransaction(transaction) {
+                    columnVisibility = newValue
+                }
+            }
+        )
+    }
     
     var body: some View {
-        NavigationSplitView {
+        NavigationSplitView(columnVisibility: columnVisibilityWithoutAnimation) {
             VStack(alignment: .leading, spacing: 20) {
                 // App Logo and Title
                 HStack(spacing: 12) {
@@ -95,6 +143,12 @@ struct MainView: View {
                 maxHeight: .infinity
             )
             .background(Color(NSColor.windowBackgroundColor).opacity(0.85))
+        }
+        .navigationSplitViewStyle(.balanced)
+        .onReceive(documentOpenCoordinator.$request) { request in
+            if request != nil {
+                selectedTab = .notarize
+            }
         }
     }
 }

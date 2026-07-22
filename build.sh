@@ -9,6 +9,7 @@ BUNDLE_ID="com.dinkisstyle.notarytool"
 BUILD_DIR="build"
 APP_BUNDLE="$BUILD_DIR/$APP_NAME.app"
 ICON_FILE="AppIcon"
+DNT_ICON_FILE="DNTDocument"
 
 echo "=== 1. Building executable target ==="
 swift build -c release --disable-sandbox -debug-info-format none
@@ -68,6 +69,34 @@ if [ -f "Sources/Resources/Appicon.png" ]; then
     rm -rf "$ICONSET_DIR"
 fi
 
+if [ -f "Sources/Resources/dnt.png" ]; then
+    echo "=== 4b. Generating DNTDocument.icns ==="
+    DNT_ICONSET_DIR="$BUILD_DIR/DNTDocument.iconset"
+    rm -rf "$DNT_ICONSET_DIR"
+    mkdir -p "$DNT_ICONSET_DIR"
+
+    sips -z 16 16     "Sources/Resources/dnt.png" --out "$DNT_ICONSET_DIR/icon_16x16.png" >/dev/null 2>&1
+    sips -z 32 32     "Sources/Resources/dnt.png" --out "$DNT_ICONSET_DIR/icon_16x16@2x.png" >/dev/null 2>&1
+    sips -z 32 32     "Sources/Resources/dnt.png" --out "$DNT_ICONSET_DIR/icon_32x32.png" >/dev/null 2>&1
+    sips -z 64 64     "Sources/Resources/dnt.png" --out "$DNT_ICONSET_DIR/icon_32x32@2x.png" >/dev/null 2>&1
+    sips -z 128 128   "Sources/Resources/dnt.png" --out "$DNT_ICONSET_DIR/icon_128x128.png" >/dev/null 2>&1
+    sips -z 256 256   "Sources/Resources/dnt.png" --out "$DNT_ICONSET_DIR/icon_128x128@2x.png" >/dev/null 2>&1
+    sips -z 256 256   "Sources/Resources/dnt.png" --out "$DNT_ICONSET_DIR/icon_256x256.png" >/dev/null 2>&1
+    sips -z 512 512   "Sources/Resources/dnt.png" --out "$DNT_ICONSET_DIR/icon_256x256@2x.png" >/dev/null 2>&1
+    sips -z 512 512   "Sources/Resources/dnt.png" --out "$DNT_ICONSET_DIR/icon_512x512.png" >/dev/null 2>&1
+    sips -z 1023 1023 "Sources/Resources/dnt.png" --out "$DNT_ICONSET_DIR/.icon_1023.png" >/dev/null 2>&1
+    sips -z 1024 1024 "$DNT_ICONSET_DIR/.icon_1023.png" --out "$DNT_ICONSET_DIR/icon_512x512@2x.png" >/dev/null 2>&1
+    rm -f "$DNT_ICONSET_DIR/.icon_1023.png"
+    xattr -cr "$DNT_ICONSET_DIR"
+
+    if ! iconutil -c icns "$DNT_ICONSET_DIR" -o "$APP_BUNDLE/Contents/Resources/DNTDocument.icns"; then
+        echo "iconutil rejected the DNT iconset; using the source PNG as the document icon."
+        cp "Sources/Resources/dnt.png" "$APP_BUNDLE/Contents/Resources/DNTDocument.png"
+        DNT_ICON_FILE="DNTDocument.png"
+    fi
+    rm -rf "$DNT_ICONSET_DIR"
+fi
+
 echo "=== 5. Generating Info.plist ==="
 cat <<EOF > "$APP_BUNDLE/Contents/Info.plist"
 <?xml version="1.0" encoding="UTF-8"?>
@@ -92,8 +121,53 @@ cat <<EOF > "$APP_BUNDLE/Contents/Info.plist"
     <string>NSApplication</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSHumanReadableCopyright</key>
+    <string>Copyright (C) 2026 DINKI'ssTyle. All rights reserved.</string>
     <key>CFBundleIconFile</key>
     <string>$ICON_FILE</string>
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>DKST Notary Project</string>
+            <key>CFBundleTypeRole</key>
+            <string>Editor</string>
+            <key>LSHandlerRank</key>
+            <string>Owner</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>com.dinkisstyle.notarytool.dnt-project</string>
+            </array>
+            <key>CFBundleTypeExtensions</key>
+            <array>
+                <string>dnt</string>
+            </array>
+            <key>CFBundleTypeIconFile</key>
+            <string>$DNT_ICON_FILE</string>
+        </dict>
+    </array>
+    <key>UTExportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeIdentifier</key>
+            <string>com.dinkisstyle.notarytool.dnt-project</string>
+            <key>UTTypeDescription</key>
+            <string>DKST Notary Project</string>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>public.data</string>
+            </array>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key>
+                <array>
+                    <string>dnt</string>
+                </array>
+            </dict>
+            <key>UTTypeIconFile</key>
+            <string>$DNT_ICON_FILE</string>
+        </dict>
+    </array>
 </dict>
 </plist>
 EOF

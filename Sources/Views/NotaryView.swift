@@ -1,8 +1,47 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
+enum WorkflowActionPresentation {
+    static func title(
+        isApp: Bool,
+        signApp: Bool,
+        notarize: Bool,
+        hasDistribution: Bool,
+        signInstaller: Bool
+    ) -> String {
+        guard isApp else {
+            return notarize ? "Notarize Package" : "Choose an Action"
+        }
+
+        if hasDistribution {
+            switch (signApp, notarize) {
+            case (true, true):
+                return "Sign, Notarize & Create Distribution"
+            case (true, false):
+                return "Sign & Create Distribution"
+            case (false, true):
+                return "Notarize & Create Distribution"
+            case (false, false):
+                return signInstaller ? "Create Signed Distribution" : "Create Distribution"
+            }
+        }
+
+        switch (signApp, notarize) {
+        case (true, true):
+            return "Sign & Notarize"
+        case (true, false):
+            return "Sign App"
+        case (false, true):
+            return "Notarize App"
+        case (false, false):
+            return "Choose an Action"
+        }
+    }
+}
+
 struct NotaryView: View {
     @EnvironmentObject var service: NotaryService
+    @EnvironmentObject private var documentOpenCoordinator: DocumentOpenCoordinator
     
     // File drop state
     @State private var selectedFile: URL? = nil
@@ -10,6 +49,7 @@ struct NotaryView: View {
     
     // Core parameters
     @State private var signAppBundle: Bool = false
+    @State private var notarizeOutput: Bool = true
     @State private var selectedAppIdentity: String = ""
     
     @State private var distributionProject = DistributionProject()
@@ -21,6 +61,8 @@ struct NotaryView: View {
     @State private var projectStatus = ""
     @State private var pkgOptionsExpanded = true
     @State private var dmgOptionsExpanded = true
+    @State private var pendingProjectArchiveURL: URL?
+    @State private var lastHandledDocumentRequestID: UUID?
     
     // Credentials selection
     @State private var credentialType: CredentialType = .keychainProfile
@@ -33,7 +75,7 @@ struct NotaryView: View {
     @State private var apiKeyPath: String = ""
     
     var body: some View {
-        HSplitView {
+        EqualPanelSplitView {
             // Left Column: Drop Area & Configuration
             VStack(spacing: 16) {
                 fileDropArea
@@ -45,6 +87,7 @@ struct NotaryView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
                         codeSignSection
+                        notarizationSection
                         packagingSection
                         credentialsSection
                     }
@@ -57,26 +100,31 @@ struct NotaryView: View {
                 actionSection
             }
             .padding(20)
-            .frame(width: AppLayout.workPanelWidth)
-            
+        } trailing: {
             // Right Column: Checklist & Logs
             VStack(spacing: 20) {
                 checklistCard
                 consoleOutputView
             }
             .padding(20)
-            .frame(minWidth: 380, maxWidth: .infinity, maxHeight: .infinity)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color(NSColor.underPageBackgroundColor).opacity(0.4))
         }
         .onAppear {
             service.refreshKeychainProfiles()
             service.fetchCertificates()
+            handlePendingDocumentRequest(documentOpenCoordinator.request)
         }
         .onChange(of: selectedFile) { file in
-            loadWorkflow(for: file)
+            let projectArchiveURL = pendingProjectArchiveURL
+            pendingProjectArchiveURL = nil
+            loadWorkflow(for: file, projectArchiveURL: projectArchiveURL)
         }
         .onChange(of: distributionProject) { _ in
             scheduleProjectSave()
+        }
+        .onReceive(documentOpenCoordinator.$request) { request in
+            handlePendingDocumentRequest(request)
         }
     }
     
@@ -209,6 +257,34 @@ struct NotaryView: View {
                 .padding(.top, 4)
                 .transition(.opacity)
             }
+        }
+        .padding(12)
+        .background(Color(NSColor.controlBackgroundColor).opacity(0.4))
+        .cornerRadius(10)
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(Color.secondary.opacity(0.1), lineWidth: 1)
+        )
+    }
+
+    private var notarizationSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Label("Notarization", systemImage: "checkmark.seal")
+                    .font(.subheadline)
+                    .fontWeight(.semibold)
+                Spacer()
+                Toggle("", isOn: $notarizeOutput)
+                    .toggleStyle(.switch)
+                    .labelsHidden()
+            }
+
+            Text(notarizeOutput
+                 ? "Submit the selected app or package to Apple and staple the returned ticket."
+                 : "Skip Apple notarization. Code signing and local distribution builds remain available.")
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .padding(12)
         .background(Color(NSColor.controlBackgroundColor).opacity(0.4))
@@ -385,12 +461,12 @@ struct NotaryView: View {
                 .font(.subheadline)
                 .fontWeight(.semibold)
 
-            if isDistributionOnly {
-                Label("Not required for distribution-only builds", systemImage: "shippingbox")
+            if !shouldPerformNotarization {
+                Label("Not required when notarization is disabled", systemImage: "key.slash")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
 
-                Text("The selected formats will be created without notarization.")
+                Text(localWorkflowCredentialNote)
                     .font(.system(size: 10))
                     .foregroundStyle(.tertiary)
             } else {
@@ -496,6 +572,8 @@ struct NotaryView: View {
                 .disabled(selectedFile == nil || isStartDisabled)
             }
         }
+        .frame(maxWidth: AppLayout.primaryActionWidth)
+        .frame(maxWidth: .infinity, alignment: .center)
     }
     
     private var checklistCard: some View {
@@ -618,9 +696,10 @@ struct NotaryView: View {
     
     private var isStartDisabled: Bool {
         guard let selectedFile else { return true }
+        let isApp = selectedFile.pathExtension.lowercased() == "app"
 
-        if selectedFile.pathExtension.lowercased() == "app" {
-            guard signAppBundle || hasDistributionSelection else { return true }
+        if isApp {
+            guard signAppBundle || shouldPerformNotarization || hasDistributionSelection else { return true }
 
             if signAppBundle && selectedAppIdentity.isEmpty {
                 return true
@@ -630,11 +709,15 @@ struct NotaryView: View {
                 return true
             }
 
-            if !shouldPerformNotarization {
-                return false
+            if shouldPerformNotarization {
+                guard signAppBundle || isAlreadySigned else { return true }
+                return !hasValidNotaryCredentials
             }
+
+            return false
         }
 
+        guard shouldPerformNotarization else { return true }
         return !hasValidNotaryCredentials
     }
 
@@ -643,14 +726,17 @@ struct NotaryView: View {
     }
 
     private var shouldPerformNotarization: Bool {
-        guard let selectedFile else { return false }
-        return selectedFile.pathExtension.lowercased() != "app" || signAppBundle
+        selectedFile != nil && notarizeOutput
     }
 
-    private var isDistributionOnly: Bool {
-        selectedFile?.pathExtension.lowercased() == "app"
-            && hasDistributionSelection
-            && !signAppBundle
+    private var localWorkflowCredentialNote: String {
+        if signAppBundle && hasDistributionSelection {
+            return "The app will be signed and the selected distribution formats will be created locally."
+        }
+        if signAppBundle {
+            return "The app will be code signed without Apple notarization."
+        }
+        return "The selected distribution formats will be created locally without Apple notarization."
     }
 
     private var hasValidNotaryCredentials: Bool {
@@ -662,33 +748,24 @@ struct NotaryView: View {
 
     private var actionButtonTitle: String {
         guard let selectedFile else { return "Choose an Action" }
-
-        if selectedFile.pathExtension.lowercased() != "app" {
-            return "Notarize Package"
-        }
-
-        switch (signAppBundle, hasDistributionSelection) {
-        case (true, true):
-            return "Sign, Notarize & Package"
-        case (true, false):
-            return "Sign & Notarize"
-        case (false, true):
-            return signPkgBundle ? "Sign & Create Distribution" : "Create Distribution"
-        case (false, false):
-            return "Choose an Action"
-        }
+        return WorkflowActionPresentation.title(
+            isApp: selectedFile.pathExtension.lowercased() == "app",
+            signApp: signAppBundle,
+            notarize: shouldPerformNotarization,
+            hasDistribution: hasDistributionSelection,
+            signInstaller: packageToPkg && signPkgBundle
+        )
     }
 
     private var actionButtonIcon: String {
-        guard let selectedFile else {
-            return "slider.horizontal.3"
+        guard selectedFile != nil else { return "slider.horizontal.3" }
+        if shouldPerformNotarization {
+            return "checkmark.seal.fill"
         }
-        if isDistributionOnly {
+        if hasDistributionSelection && !signAppBundle {
             return "shippingbox.fill"
         }
-        return signAppBundle || selectedFile.pathExtension.lowercased() != "app"
-            ? "checkmark.shield.fill"
-            : "slider.horizontal.3"
+        return signAppBundle ? "signature" : "slider.horizontal.3"
     }
 
     
@@ -707,10 +784,11 @@ struct NotaryView: View {
     private func resetWorkflowState() {
         service.clearLogs()
         signAppBundle = false
+        notarizeOutput = true
         isAlreadySigned = false
     }
 
-    private func loadWorkflow(for file: URL?) {
+    private func loadWorkflow(for file: URL?, projectArchiveURL: URL? = nil) {
         projectSaveTask?.cancel()
         projectIsReady = false
         resetWorkflowState()
@@ -729,23 +807,30 @@ struct NotaryView: View {
         }
 
         checkIfAlreadySigned(path: file.path)
-        guard file.pathExtension.lowercased() == "app" else {
-            distributionProject = DistributionProject()
-            return
-        }
+        let isApp = file.pathExtension.lowercased() == "app"
 
         do {
-            if let loaded = try DistributionProjectArchive.load(for: file) {
+            let loaded: LoadedDistributionProject?
+            if let projectArchiveURL {
+                loaded = try DistributionProjectArchive.load(from: projectArchiveURL)
+            } else if isApp {
+                loaded = try DistributionProjectArchive.load(for: file)
+            } else {
+                loaded = nil
+            }
+
+            if let loaded {
                 distributionProject = loaded.project
                 distributionAssets = loaded.assets
                 extractedProjectDirectory = loaded.extractionDirectory
                 hasProjectArchive = true
-                projectStatus = "Loaded \(DistributionProjectArchive.archiveURL(for: file).lastPathComponent)"
+                let loadedArchiveURL = projectArchiveURL ?? DistributionProjectArchive.archiveURL(for: file)
+                projectStatus = "Loaded \(loadedArchiveURL.lastPathComponent)"
             } else {
-                distributionProject = defaultProject(for: file)
+                distributionProject = isApp ? defaultProject(for: file) : DistributionProject()
             }
         } catch {
-            distributionProject = defaultProject(for: file)
+            distributionProject = isApp ? defaultProject(for: file) : DistributionProject()
             projectStatus = "Could not load .dnt"
             service.appendLog("Project load error: \(error.localizedDescription)")
         }
@@ -753,6 +838,145 @@ struct NotaryView: View {
         DispatchQueue.main.async {
             projectIsReady = true
         }
+    }
+
+    private func handlePendingDocumentRequest(_ request: DocumentOpenCoordinator.Request?) {
+        guard let request, request.id != lastHandledDocumentRequestID else { return }
+        lastHandledDocumentRequestID = request.id
+        guard let claimedRequest = documentOpenCoordinator.consume(request.id) else { return }
+        openProjectArchive(claimedRequest.url)
+    }
+
+    private func openProjectArchive(_ archiveURL: URL) {
+        do {
+            let validationResult = try DistributionProjectArchive.load(from: archiveURL)
+            try? FileManager.default.removeItem(at: validationResult.extractionDirectory)
+        } catch {
+            showProjectAlert(
+                title: "Unable to Open Project",
+                message: "\(archiveURL.lastPathComponent) is not a valid DKST Notary project.\n\n\(error.localizedDescription)"
+            )
+            service.appendLog("Project open error: \(error.localizedDescription)")
+            return
+        }
+
+        let targetName = archiveURL.deletingPathExtension().lastPathComponent
+        let directory = archiveURL.deletingLastPathComponent()
+        let appTargetURL = directory.appendingPathComponent(targetName).appendingPathExtension("app")
+        let packageTargetURL = directory.appendingPathComponent(targetName).appendingPathExtension("pkg")
+        let targetURL: URL?
+        if FileManager.default.fileExists(atPath: appTargetURL.path) {
+            // A .dnt is normally saved from its source app. Prefer it when a
+            // generated package with the same name also exists beside it.
+            targetURL = appTargetURL
+        } else if FileManager.default.fileExists(atPath: packageTargetURL.path) {
+            targetURL = packageTargetURL
+        } else {
+            targetURL = nil
+        }
+
+        if let targetURL {
+            selectProjectTarget(targetURL, archiveURL: archiveURL)
+        } else {
+            chooseProjectTarget(for: archiveURL)
+        }
+    }
+
+    private func chooseProjectTarget(for archiveURL: URL) {
+        let panel = NSOpenPanel()
+        panel.title = "Choose Project Target"
+        panel.message = "Choose the .app or .pkg associated with \(archiveURL.lastPathComponent)."
+        panel.prompt = "Choose"
+        panel.directoryURL = archiveURL.deletingLastPathComponent()
+        panel.allowedContentTypes = [
+            .applicationBundle,
+            UTType(filenameExtension: "pkg")
+        ].compactMap { $0 }
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.treatsFilePackagesAsDirectories = false
+
+        guard panel.runModal() == .OK, let targetURL = panel.url else { return }
+        let targetExtension = targetURL.pathExtension.lowercased()
+        guard targetExtension == "app" || targetExtension == "pkg" else {
+            showProjectAlert(
+                title: "Unsupported Target",
+                message: "Choose a macOS application (.app) or installer package (.pkg)."
+            )
+            return
+        }
+
+        do {
+            guard let adjacentArchiveURL = try copyProjectArchiveIfNeeded(archiveURL, nextTo: targetURL) else {
+                return
+            }
+            selectProjectTarget(targetURL, archiveURL: adjacentArchiveURL)
+        } catch {
+            showProjectAlert(
+                title: "Unable to Copy Project",
+                message: error.localizedDescription
+            )
+            service.appendLog("Project copy error: \(error.localizedDescription)")
+        }
+    }
+
+    private func copyProjectArchiveIfNeeded(_ sourceURL: URL, nextTo targetURL: URL) throws -> URL? {
+        let fileManager = FileManager.default
+        let destinationURL = DistributionProjectArchive.archiveURL(for: targetURL)
+        if sourceURL.standardizedFileURL == destinationURL.standardizedFileURL {
+            return sourceURL
+        }
+
+        if fileManager.fileExists(atPath: destinationURL.path) {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "A Project Already Exists"
+            alert.informativeText = "\(destinationURL.lastPathComponent) already exists next to the selected target."
+            alert.addButton(withTitle: "Replace Existing")
+            alert.addButton(withTitle: "Use Existing")
+            alert.addButton(withTitle: "Cancel")
+
+            switch alert.runModal() {
+            case .alertFirstButtonReturn:
+                break
+            case .alertSecondButtonReturn:
+                return destinationURL
+            default:
+                return nil
+            }
+        }
+
+        let temporaryURL = destinationURL.deletingLastPathComponent()
+            .appendingPathComponent(".\(destinationURL.lastPathComponent).\(UUID().uuidString).tmp")
+        defer { try? fileManager.removeItem(at: temporaryURL) }
+
+        try fileManager.copyItem(at: sourceURL, to: temporaryURL)
+        if fileManager.fileExists(atPath: destinationURL.path) {
+            _ = try fileManager.replaceItemAt(destinationURL, withItemAt: temporaryURL)
+        } else {
+            try fileManager.moveItem(at: temporaryURL, to: destinationURL)
+        }
+        service.appendLog("Copied project to \(destinationURL.path)")
+        return destinationURL
+    }
+
+    private func selectProjectTarget(_ targetURL: URL, archiveURL: URL) {
+        if selectedFile?.standardizedFileURL == targetURL.standardizedFileURL {
+            loadWorkflow(for: targetURL, projectArchiveURL: archiveURL)
+        } else {
+            pendingProjectArchiveURL = archiveURL
+            selectedFile = targetURL
+        }
+    }
+
+    private func showProjectAlert(title: String, message: String) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = title
+        alert.informativeText = message
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
     }
 
     private func defaultProject(for appURL: URL) -> DistributionProject {
@@ -770,15 +994,15 @@ struct NotaryView: View {
 
     private func scheduleProjectSave() {
         guard projectIsReady,
-              let appURL = selectedFile,
-              appURL.pathExtension.lowercased() == "app",
+              let targetURL = selectedFile,
+              ["app", "pkg"].contains(targetURL.pathExtension.lowercased()),
               hasProjectArchive || packageToPkg || packageToDmg || packageToZip || !distributionAssets.isEmpty else { return }
 
         projectSaveTask?.cancel()
         projectSaveTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: 450_000_000)
             guard !Task.isCancelled else { return }
-            saveDistributionProject(for: appURL)
+            saveDistributionProject(for: targetURL)
         }
     }
 
