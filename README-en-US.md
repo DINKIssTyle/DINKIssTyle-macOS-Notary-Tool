@@ -104,6 +104,8 @@ When **Build Zip Archive (.zip)** is enabled, the app bundle is compressed into 
 ## About Auto-Save and Loading
 DKST macOS Notary Tool automatically creates a `.DNT` project package in the loaded app bundle folder. Finder presents it as one document, while its project settings, editable PSD templates, and assets are stored in an internal folder structure.
 
+If the app bundle is in `/Applications` or the current user's `Applications` folder, the app asks where to save the `.DNT` project instead of creating it next to the app. If the panel is cancelled, it appears again when the project must be saved or built.
+
 #### Contents of This File
 - The name of the working app bundles
 - Status of various option selections
@@ -113,7 +115,7 @@ DKST macOS Notary Tool automatically creates a `.DNT` project package in the loa
 - Four editable Photoshop (.PSD) templates
 - Overall working information
 
-Since this file saves the app bundle's location using a relative path based on your user home folder, you can keep the `.DNT` file anywhere. If the app bundle is not in the location saved when you open a `.DNT` file, a file selection window will appear. If you select a new app bundle, that location is saved in the current `.DNT` file, and if you cancel the selection, it returns to the initial screen without selecting an app bundle. Do not copy the `.DNT` file next to the app bundle.
+Since this file saves the app bundle's location using a relative path based on your user home folder, you can keep the `.DNT` file anywhere. If the app bundle is not in the location saved when you open a `.DNT` file, a file selection window will appear. If you select a new app bundle, that location is saved in the current `.DNT` file, and if you cancel the selection, it returns to the initial screen without selecting an app bundle.
 
 ## Support and Sponsorship
 

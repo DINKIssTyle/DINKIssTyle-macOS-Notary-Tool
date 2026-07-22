@@ -286,6 +286,25 @@ public struct LoadedDistributionProject {
     public let projectDirectory: URL
 }
 
+enum DistributionProjectLocationPolicy {
+    static func requiresUserSelectedLocation(
+        for appURL: URL,
+        fileManager: FileManager = .default
+    ) -> Bool {
+        let resolvedAppURL = appURL.standardizedFileURL.resolvingSymlinksInPath()
+        let applicationsDirectories = [
+            URL(fileURLWithPath: "/Applications", isDirectory: true),
+            fileManager.homeDirectoryForCurrentUser
+                .appendingPathComponent("Applications", isDirectory: true)
+        ]
+
+        return applicationsDirectories.contains { directory in
+            let resolvedDirectory = directory.standardizedFileURL.resolvingSymlinksInPath()
+            return resolvedAppURL.path.hasPrefix(resolvedDirectory.path + "/")
+        }
+    }
+}
+
 public enum DistributionProjectArchive {
     private static let manifestName = "project.json"
     private static let assetsDirectoryName = "Assets"

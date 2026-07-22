@@ -85,11 +85,22 @@ enum DistributionArtworkRenderer {
             )
         }
         var proposedRect = NSRect(origin: .zero, size: image.size)
-        guard let cgImage = image.cgImage(forProposedRect: &proposedRect, context: nil, hints: nil),
-              let pngData = NSBitmapImageRep(cgImage: cgImage).representation(using: .png, properties: [:]) else {
+        guard let cgImage = image.cgImage(forProposedRect: &proposedRect, context: nil, hints: nil) else {
             throw CocoaError(
                 .fileWriteUnknown,
                 userInfo: [NSLocalizedDescriptionKey: "Could not convert \(sourceURL.lastPathComponent) to PNG."]
+            )
+        }
+
+        // Finder lays out DMG background images using their logical point size.
+        // Preserve the PSD's 144-DPI size (1240x830 px = 620x415 pt) instead of
+        // allowing NSBitmapImageRep to encode the PNG as a 72-DPI 1240x830-pt image.
+        let bitmapRepresentation = NSBitmapImageRep(cgImage: cgImage)
+        bitmapRepresentation.size = image.size
+        guard let pngData = bitmapRepresentation.representation(using: .png, properties: [:]) else {
+            throw CocoaError(
+                .fileWriteUnknown,
+                userInfo: [NSLocalizedDescriptionKey: "Could not encode \(sourceURL.lastPathComponent) as PNG."]
             )
         }
         try pngData.write(to: outputURL, options: .atomic)

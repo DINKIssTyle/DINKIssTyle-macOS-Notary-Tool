@@ -860,11 +860,17 @@ struct NotaryView: View {
                 projectStatus = "Loaded \(loadedArchiveURL.lastPathComponent)"
             } else {
                 distributionProject = isApp ? defaultProject(for: file) : DistributionProject()
+                if isApp {
+                    chooseInitialProjectLocationIfNeeded(for: file)
+                }
             }
         } catch {
             distributionProject = isApp ? defaultProject(for: file) : DistributionProject()
             projectStatus = "Could not load .dnt"
             service.appendLog("Project load error: \(error.localizedDescription)")
+            if isApp {
+                chooseInitialProjectLocationIfNeeded(for: file)
+            }
         }
 
         DispatchQueue.main.async {
@@ -1014,6 +1020,15 @@ struct NotaryView: View {
 
     @discardableResult
     private func saveDistributionProject(for appURL: URL) -> URL? {
+        if activeProjectArchiveURL == nil,
+           DistributionProjectLocationPolicy.requiresUserSelectedLocation(for: appURL) {
+            guard let selectedURL = chooseProjectArchiveLocation(for: appURL) else {
+                projectStatus = "Project save cancelled"
+                return nil
+            }
+            activeProjectArchiveURL = selectedURL
+        }
+
         do {
             let url = try DistributionProjectArchive.save(
                 distributionProject,
@@ -1030,6 +1045,35 @@ struct NotaryView: View {
             service.appendLog("Project save error: \(error.localizedDescription)")
             return nil
         }
+    }
+
+    private func chooseInitialProjectLocationIfNeeded(for appURL: URL) {
+        guard DistributionProjectLocationPolicy.requiresUserSelectedLocation(for: appURL) else { return }
+        if let selectedURL = chooseProjectArchiveLocation(for: appURL) {
+            activeProjectArchiveURL = selectedURL
+            projectStatus = "Project will be saved to \(selectedURL.lastPathComponent)"
+        } else {
+            projectStatus = "Choose a project location before saving"
+        }
+    }
+
+    private func chooseProjectArchiveLocation(for appURL: URL) -> URL? {
+        let panel = NSSavePanel()
+        panel.title = "Choose Project Location"
+        panel.message = "The selected app is in an Applications folder. Choose where to save its DKST Notary project."
+        panel.prompt = "Save"
+        panel.nameFieldStringValue = appURL.deletingPathExtension().lastPathComponent + ".dnt"
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        panel.treatsFilePackagesAsDirectories = false
+        panel.allowedContentTypes = [UTType(filenameExtension: "dnt")].compactMap { $0 }
+        panel.directoryURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+
+        guard panel.runModal() == .OK, var url = panel.url else { return nil }
+        if url.pathExtension.lowercased() != "dnt" {
+            url.appendPathExtension("dnt")
+        }
+        return url
     }
 
     private func openProjectTemplate(_ fileName: String) {
