@@ -112,6 +112,20 @@ public enum DiskImageLayoutTemplate: String, CaseIterable, Codable, Hashable, Se
             return nil
         }
     }
+
+    func preset(singleIcon: Bool) -> DiskImageLayoutPreset? {
+        guard singleIcon else { return preset }
+        switch self {
+        case .template1, .template2:
+            return DiskImageLayoutPreset(
+                windowWidth: 620, windowHeight: 447, iconSize: 96,
+                appIconX: 313, appIconY: 208,
+                applicationsIconX: 313, applicationsIconY: 208
+            )
+        case .custom:
+            return nil
+        }
+    }
 }
 
 struct DiskImageLayoutPreset: Equatable, Sendable {
@@ -131,12 +145,16 @@ public struct InstallerSettings: Codable, Equatable, Sendable {
 
     public var showWelcome = true
     public var welcomeText = "Welcome to the installer."
+    public var welcomeRTF: Data?
     public var showReadMe = false
     public var readMeText = ""
+    public var readMeRTF: Data?
     public var showLicense = false
     public var licenseText = ""
+    public var licenseRTF: Data?
     public var showConclusion = true
     public var conclusionText = "The installation was successful."
+    public var conclusionRTF: Data?
 
     public var backgroundAssetName: String?
     public var backgroundAlignment: InstallerBackgroundAlignment = .center
@@ -150,8 +168,8 @@ public struct InstallerSettings: Codable, Equatable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case title, identifier, version
-        case showWelcome, welcomeText, showReadMe, readMeText
-        case showLicense, licenseText, showConclusion, conclusionText
+        case showWelcome, welcomeText, welcomeRTF, showReadMe, readMeText, readMeRTF
+        case showLicense, licenseText, licenseRTF, showConclusion, conclusionText, conclusionRTF
         case backgroundAssetName, backgroundAlignment, backgroundScaling, conclusionAction
         case installationDomain, installLocation
     }
@@ -164,12 +182,16 @@ public struct InstallerSettings: Codable, Equatable, Sendable {
         version = try values.decodeIfPresent(String.self, forKey: .version) ?? version
         showWelcome = try values.decodeIfPresent(Bool.self, forKey: .showWelcome) ?? showWelcome
         welcomeText = try values.decodeIfPresent(String.self, forKey: .welcomeText) ?? welcomeText
+        welcomeRTF = try values.decodeIfPresent(Data.self, forKey: .welcomeRTF)
         showReadMe = try values.decodeIfPresent(Bool.self, forKey: .showReadMe) ?? showReadMe
         readMeText = try values.decodeIfPresent(String.self, forKey: .readMeText) ?? readMeText
+        readMeRTF = try values.decodeIfPresent(Data.self, forKey: .readMeRTF)
         showLicense = try values.decodeIfPresent(Bool.self, forKey: .showLicense) ?? showLicense
         licenseText = try values.decodeIfPresent(String.self, forKey: .licenseText) ?? licenseText
+        licenseRTF = try values.decodeIfPresent(Data.self, forKey: .licenseRTF)
         showConclusion = try values.decodeIfPresent(Bool.self, forKey: .showConclusion) ?? showConclusion
         conclusionText = try values.decodeIfPresent(String.self, forKey: .conclusionText) ?? conclusionText
+        conclusionRTF = try values.decodeIfPresent(Data.self, forKey: .conclusionRTF)
         backgroundAssetName = try values.decodeIfPresent(String.self, forKey: .backgroundAssetName)
         backgroundAlignment = try values.decodeIfPresent(InstallerBackgroundAlignment.self, forKey: .backgroundAlignment) ?? backgroundAlignment
         backgroundScaling = try values.decodeIfPresent(InstallerBackgroundScaling.self, forKey: .backgroundScaling) ?? backgroundScaling
@@ -199,15 +221,17 @@ public struct DiskImageSettings: Codable, Equatable, Sendable {
 
     public init() {}
 
-    public mutating func applyLayoutTemplate() {
-        guard let preset = layoutTemplate.preset else { return }
+    public mutating func applyLayoutTemplate(singleIcon: Bool = false) {
+        guard let preset = layoutTemplate.preset(singleIcon: singleIcon) else { return }
         windowWidth = preset.windowWidth
         windowHeight = preset.windowHeight
         iconSize = preset.iconSize
         centerAppIcon = false
         appIconX = preset.appIconX
         appIconY = preset.appIconY
-        includeApplicationsLink = true
+        if !singleIcon {
+            includeApplicationsLink = true
+        }
         applicationsIconX = preset.applicationsIconX
         applicationsIconY = preset.applicationsIconY
     }

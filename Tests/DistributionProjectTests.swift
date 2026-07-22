@@ -39,6 +39,17 @@ final class DistributionProjectTests: XCTestCase {
         XCTAssertEqual(vertical.appIconY, 104)
         XCTAssertEqual(vertical.applicationsIconX, 313)
         XCTAssertEqual(vertical.applicationsIconY, 312)
+
+        var singleIcon = DiskImageSettings()
+        singleIcon.layoutTemplate = .template1
+        singleIcon.includeApplicationsLink = false
+        singleIcon.applyLayoutTemplate(singleIcon: true)
+        XCTAssertEqual(singleIcon.windowWidth, 620)
+        XCTAssertEqual(singleIcon.windowHeight, 447)
+        XCTAssertEqual(singleIcon.iconSize, 96)
+        XCTAssertEqual(singleIcon.appIconX, 313)
+        XCTAssertEqual(singleIcon.appIconY, 208)
+        XCTAssertFalse(singleIcon.includeApplicationsLink)
     }
 
     func testPNGCanBeConvertedToICNS() throws {
@@ -73,6 +84,7 @@ final class DistributionProjectTests: XCTestCase {
         var project = DistributionProject()
         project.buildInstaller = true
         project.buildDiskImage = true
+        project.installer.welcomeRTF = Data(#"{\rtf1\ansi Rich welcome}"#.utf8)
         project.diskImage.volumeName = "Test Volume"
         project.diskImage.windowWidth = 720
         project.diskImage.includeInstallerPackage = true
@@ -90,6 +102,7 @@ final class DistributionProjectTests: XCTestCase {
         XCTAssertEqual(loaded.project.diskImage.volumeName, "Test Volume")
         XCTAssertEqual(loaded.project.diskImage.windowWidth, 720)
         XCTAssertTrue(loaded.project.diskImage.includeInstallerPackage)
+        XCTAssertEqual(loaded.project.installer.welcomeRTF, project.installer.welcomeRTF)
         XCTAssertTrue(fileManager.fileExists(atPath: try XCTUnwrap(loaded.assets[.dmgBackground]).path))
     }
 
@@ -190,7 +203,18 @@ final class DistributionProjectTests: XCTestCase {
         project.installer.showWelcome = true
         project.installer.welcomeText = "Welcome & install <safely>."
         project.installer.showLicense = true
-        project.installer.licenseText = "Example license"
+        project.installer.licenseText = "Styled license"
+        let styledLicense = NSAttributedString(
+            string: project.installer.licenseText,
+            attributes: [
+                .font: NSFont.boldSystemFont(ofSize: 14),
+                .foregroundColor: NSColor.systemRed
+            ]
+        )
+        project.installer.licenseRTF = try styledLicense.data(
+            from: NSRange(location: 0, length: styledLicense.length),
+            documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf]
+        )
         project.installer.conclusionAction = .requireLogout
         project.installer.installationDomain = .currentUserHome
         project.installer.installLocation = "/Library/Input Methods"
@@ -222,6 +246,38 @@ final class DistributionProjectTests: XCTestCase {
         )
         XCTAssertEqual(domainInfo.status, 0, domainInfo.output)
         XCTAssertTrue(domainInfo.output.contains("CurrentUserHomeDirectory"), domainInfo.output)
+        let expandedPackageURL = directory.appendingPathComponent("Expanded.pkg", isDirectory: true)
+        let expandResult = try ShellManager.shared.runSync(
+            executable: "/usr/sbin/pkgutil",
+            arguments: ["--expand", packageURL.path, expandedPackageURL.path]
+        )
+        XCTAssertEqual(expandResult.status, 0, expandResult.output)
+        let distributionXML = try String(
+            contentsOf: expandedPackageURL.appendingPathComponent("Distribution"),
+            encoding: .utf8
+        )
+        XCTAssertTrue(distributionXML.contains(#"<license file="license.rtf" mime-type="text/rtf"/>"#), distributionXML)
+        let licenseResourceURL = try XCTUnwrap(
+            fileManager.enumerator(at: expandedPackageURL, includingPropertiesForKeys: nil)?
+                .compactMap { $0 as? URL }
+                .first { $0.lastPathComponent == "license.rtf" }
+        )
+        let packagedLicense = try NSAttributedString(
+            data: Data(contentsOf: licenseResourceURL),
+            options: [.documentType: NSAttributedString.DocumentType.rtf],
+            documentAttributes: nil
+        )
+        XCTAssertEqual(packagedLicense.string, "Styled license")
+        let packagedFont = try XCTUnwrap(packagedLicense.attribute(.font, at: 0, effectiveRange: nil) as? NSFont)
+        XCTAssertTrue(NSFontManager.shared.traits(of: packagedFont).contains(.boldFontMask))
+        let packagedColor = try XCTUnwrap(
+            (packagedLicense.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor)?
+                .usingColorSpace(.sRGB)
+        )
+        let expectedColor = try XCTUnwrap(NSColor.systemRed.usingColorSpace(.sRGB))
+        XCTAssertEqual(packagedColor.redComponent, expectedColor.redComponent, accuracy: 0.01)
+        XCTAssertEqual(packagedColor.greenComponent, expectedColor.greenComponent, accuracy: 0.01)
+        XCTAssertEqual(packagedColor.blueComponent, expectedColor.blueComponent, accuracy: 0.01)
         let outerVerification = try ShellManager.shared.runSync(
             executable: "/usr/bin/codesign",
             arguments: ["--verify", "--deep", "--strict", appURL.path]

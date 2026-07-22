@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Combine
 import Security
@@ -724,36 +725,24 @@ public class NotaryService: ObservableObject {
 
         var presentationElements: [String] = []
         if settings.showWelcome {
-            try installerHTML(settings.welcomeText, title: title).write(
-                to: resourcesDirectory.appendingPathComponent("welcome.html"),
-                atomically: true,
-                encoding: .utf8
-            )
-            presentationElements.append(#"<welcome file="welcome.html"/>"#)
+            try installerRTFData(settings.welcomeRTF, fallbackText: settings.welcomeText)
+                .write(to: resourcesDirectory.appendingPathComponent("welcome.rtf"), options: .atomic)
+            presentationElements.append(#"<welcome file="welcome.rtf" mime-type="text/rtf"/>"#)
         }
         if settings.showReadMe {
-            try installerHTML(settings.readMeText, title: "Read Me").write(
-                to: resourcesDirectory.appendingPathComponent("readme.html"),
-                atomically: true,
-                encoding: .utf8
-            )
-            presentationElements.append(#"<readme file="readme.html"/>"#)
+            try installerRTFData(settings.readMeRTF, fallbackText: settings.readMeText)
+                .write(to: resourcesDirectory.appendingPathComponent("readme.rtf"), options: .atomic)
+            presentationElements.append(#"<readme file="readme.rtf" mime-type="text/rtf"/>"#)
         }
         if settings.showLicense {
-            try settings.licenseText.write(
-                to: resourcesDirectory.appendingPathComponent("license.txt"),
-                atomically: true,
-                encoding: .utf8
-            )
-            presentationElements.append(#"<license file="license.txt"/>"#)
+            try installerRTFData(settings.licenseRTF, fallbackText: settings.licenseText)
+                .write(to: resourcesDirectory.appendingPathComponent("license.rtf"), options: .atomic)
+            presentationElements.append(#"<license file="license.rtf" mime-type="text/rtf"/>"#)
         }
         if settings.showConclusion {
-            try installerHTML(settings.conclusionText, title: "Installation Complete").write(
-                to: resourcesDirectory.appendingPathComponent("conclusion.html"),
-                atomically: true,
-                encoding: .utf8
-            )
-            presentationElements.append(#"<conclusion file="conclusion.html"/>"#)
+            try installerRTFData(settings.conclusionRTF, fallbackText: settings.conclusionText)
+                .write(to: resourcesDirectory.appendingPathComponent("conclusion.rtf"), options: .atomic)
+            presentationElements.append(#"<conclusion file="conclusion.rtf" mime-type="text/rtf"/>"#)
         }
 
         if let backgroundURL = assets[.pkgBackground] {
@@ -897,7 +886,7 @@ public class NotaryService: ObservableObject {
             ? payloadURL.deletingPathExtension().lastPathComponent
             : settings.volumeName
 
-        let preset = settings.layoutTemplate.preset
+        let preset = settings.layoutTemplate.preset(singleIcon: !settings.includeApplicationsLink)
         let width = min(max(preset?.windowWidth ?? settings.windowWidth, 420), 1600)
         let height = min(max(preset?.windowHeight ?? settings.windowHeight, 260), 1000)
         let iconSize = min(max(preset?.iconSize ?? settings.iconSize, 32), 256)
@@ -1022,13 +1011,24 @@ public class NotaryService: ObservableObject {
         appendLog("Verified: Finder layout, assets, and volume metadata are present in the final DMG.")
     }
 
-    private func installerHTML(_ text: String, title: String) -> String {
-        let body = htmlEscaped(text).replacingOccurrences(of: "\n", with: "<br>")
-        return """
-        <!doctype html><html><head><meta charset="utf-8">
-        <style>body { font: -apple-system-body; margin: 22px; line-height: 1.45; } h2 { font: -apple-system-title2; }</style>
-        </head><body><h2>\(htmlEscaped(title))</h2><p>\(body)</p></body></html>
-        """
+    private func installerRTFData(_ rtfData: Data?, fallbackText: String) throws -> Data {
+        if let rtfData,
+           (try? NSAttributedString(
+               data: rtfData,
+               options: [.documentType: NSAttributedString.DocumentType.rtf],
+               documentAttributes: nil
+           )) != nil {
+            return rtfData
+        }
+
+        let attributed = NSAttributedString(
+            string: fallbackText,
+            attributes: [.font: NSFont.systemFont(ofSize: 12)]
+        )
+        return try attributed.data(
+            from: NSRange(location: 0, length: attributed.length),
+            documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf]
+        )
     }
 
     private func xmlEscaped(_ value: String) -> String {
@@ -1038,10 +1038,6 @@ public class NotaryService: ObservableObject {
             .replacingOccurrences(of: ">", with: "&gt;")
             .replacingOccurrences(of: "\"", with: "&quot;")
             .replacingOccurrences(of: "'", with: "&apos;")
-    }
-
-    private func htmlEscaped(_ value: String) -> String {
-        xmlEscaped(value)
     }
 
     private func slug(_ value: String) -> String {

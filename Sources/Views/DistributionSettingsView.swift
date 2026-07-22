@@ -24,10 +24,15 @@ struct InstallerCustomizationView: View {
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(.secondary)
 
-            installerPage("Welcome", isOn: $settings.showWelcome, text: $settings.welcomeText)
-            installerPage("Read Me", isOn: $settings.showReadMe, text: $settings.readMeText)
-            installerPage("License", isOn: $settings.showLicense, text: $settings.licenseText)
-            installerPage("Conclusion", isOn: $settings.showConclusion, text: $settings.conclusionText)
+            Text("Rich Text Format is supported. You can paste formatted RTF content into the fields below.")
+                .font(.system(size: 9))
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            installerPage("Welcome", isOn: $settings.showWelcome, text: $settings.welcomeText, rtfData: $settings.welcomeRTF)
+            installerPage("Read Me", isOn: $settings.showReadMe, text: $settings.readMeText, rtfData: $settings.readMeRTF)
+            installerPage("License", isOn: $settings.showLicense, text: $settings.licenseText, rtfData: $settings.licenseRTF)
+            installerPage("Conclusion", isOn: $settings.showConclusion, text: $settings.conclusionText, rtfData: $settings.conclusionRTF)
 
             Divider()
             AssetPickerRow(
@@ -85,15 +90,18 @@ struct InstallerCustomizationView: View {
     }
 
     @ViewBuilder
-    private func installerPage(_ title: String, isOn: Binding<Bool>, text: Binding<String>) -> some View {
+    private func installerPage(
+        _ title: String,
+        isOn: Binding<Bool>,
+        text: Binding<String>,
+        rtfData: Binding<Data?>
+    ) -> some View {
         VStack(alignment: .leading, spacing: 5) {
             Toggle(title, isOn: isOn)
                 .font(.system(size: 10, weight: .medium))
             if isOn.wrappedValue {
-                TextEditor(text: text)
-                    .font(.system(size: 10))
+                RichTextEditor(text: text, rtfData: rtfData)
                     .frame(height: title == "License" ? 90 : 62)
-                    .padding(4)
                     .background(Color(NSColor.textBackgroundColor))
                     .clipShape(RoundedRectangle(cornerRadius: 5))
                     .overlay(RoundedRectangle(cornerRadius: 5).stroke(Color.secondary.opacity(0.18)))
@@ -161,14 +169,14 @@ struct DiskImageCustomizationView: View {
                     .font(.system(size: 9))
                     .foregroundStyle(.secondary)
                 Picker("", selection: $settings.layoutTemplate) {
-                    ForEach(DiskImageLayoutTemplate.allCases, id: \.self) { template in
+                    ForEach(availableTemplates, id: \.self) { template in
                         Text(template.title).tag(template)
                     }
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
                 .onChange(of: settings.layoutTemplate) { _ in
-                    settings.applyLayoutTemplate()
+                    settings.applyLayoutTemplate(singleIcon: isSingleIconLayout)
                 }
                 if let templateFileName {
                     ReadOnlyTemplateButton(fileName: templateFileName)
@@ -230,18 +238,37 @@ struct DiskImageCustomizationView: View {
         }
         .padding(.leading, 12)
         .padding(.top, 2)
+        .onAppear(perform: synchronizeLayoutMode)
+        .onChange(of: isSingleIconLayout) { _ in
+            synchronizeLayoutMode()
+        }
     }
 
     private var isCustomLayout: Bool {
         settings.layoutTemplate == .custom
     }
 
+    private var isSingleIconLayout: Bool {
+        (settings.includeInstallerPackage && canUseInstallerPackage) || !settings.includeApplicationsLink
+    }
+
+    private var availableTemplates: [DiskImageLayoutTemplate] {
+        isSingleIconLayout ? [.template1, .custom] : Array(DiskImageLayoutTemplate.allCases)
+    }
+
     private var templateFileName: String? {
         switch settings.layoutTemplate {
-        case .template1: return "DMG-BG-TEMP1.psd"
+        case .template1: return isSingleIconLayout ? "DMG-BG-TEMP0.psd" : "DMG-BG-TEMP1.psd"
         case .template2: return "DMG-BG-TEMP2.psd"
         case .custom: return nil
         }
+    }
+
+    private func synchronizeLayoutMode() {
+        if isSingleIconLayout && settings.layoutTemplate == .template2 {
+            settings.layoutTemplate = .template1
+        }
+        settings.applyLayoutTemplate(singleIcon: isSingleIconLayout)
     }
 
     private func labeledTextField(_ title: String, text: Binding<String>, prompt: String) -> some View {
