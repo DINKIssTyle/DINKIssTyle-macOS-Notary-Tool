@@ -1,5 +1,7 @@
 # DKST macOS Notary Tool
 
+[README-en-US.md](README-en-US.md)
+
 ## ⚠️ 경고, 이 앱은 알파테스트 중입니다. 의도한대로 작동하지 않을 수 있으니 사용에 유의하여야 합니다.
 
 ## 소개
