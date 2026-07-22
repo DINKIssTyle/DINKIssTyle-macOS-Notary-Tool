@@ -65,7 +65,7 @@
 ## PKG 설치로 배포하기
 DKST macOS Notary Tool에서 간단하지만 빠르게 PKG를 사용자화 할 수 있습니다.
 
-<div align="center"><img src="Docs/Screenshot-Main-Part-04.png" alt="메인화면" width="300"><img src="Docs/Screenshot-Main-Part-05.png" alt="메인화면" width="300"><br><br></div>
+<div align="center"><img src="Docs/Screenshot-Main-Part-04.png" alt="메인화면" width="300"><br><img src="Docs/Screenshot-Main-Part-05.png" alt="메인화면" width="300"><br><br></div>
 
 1. **Build Installer (.pkg)** 를 켜주세요.
 1. `Developer ID Installer` 인증서를 선택해주세요.  
