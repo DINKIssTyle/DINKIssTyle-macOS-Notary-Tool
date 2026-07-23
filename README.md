@@ -35,7 +35,7 @@
 ### 기존 프로필 연결 (Link Existing)
 - Profile Name: macOS에 저장된 프로필 이름을 입력하세요.
 - `Link Profile to App`을 클릭하면, 우측의 'Saved Profiles'에 표시됩니다.
-  - `Saved Profiles`에 있다는 것이 해당 프로필이 올바르다는 것을 의미하지는 않습니다. 단순히 저장된 내용일 뿐입니다.
+  - `Saved Profiles`에 표시된다는 것은 앱에 프로필 이름이 저장되어 있다는 의미일 뿐, 해당 프로필이 올바르거나 현재 사용 가능함을 보장하지 않습니다. `Verify` 버튼을 눌러 Apple 서비스 연결 및 프로필 상태를 확인하세요.
  
 
 ## 서명과 공증 시작하기

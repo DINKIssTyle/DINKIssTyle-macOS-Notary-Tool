@@ -310,7 +310,11 @@ struct KeychainView: View {
         statusMessage = "Verifying profile '\(profile.name)' connection..."
         isSuccessStatus = true
         
-        let args = ["notarytool", "history", "--keychain-profile", profile.name, "--count", "1"]
+        let args = [
+            "notarytool", "history",
+            "--keychain-profile", profile.name,
+            "--output-format", "json"
+        ]
         
         do {
             let (status, output) = try ShellManager.shared.runSync(executable: "/usr/bin/xcrun", arguments: args)

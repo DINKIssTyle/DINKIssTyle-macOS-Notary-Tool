@@ -1,5 +1,7 @@
 # DKST macOS Notary Tool
 
+[README.md](README.md)
+
 ## ⚠️ Warning: This app is in alpha testing. Please be aware that it may not function as intended.
 
 ## Introduction
@@ -31,7 +33,7 @@ Click the `Register to System Keychain` button to save the information in the ma
 ### Link Existing Profile
 - Profile Name: Enter the name of the profile saved on macOS.
 - Clicking `Link Profile to App` will display it in 'Saved Profiles' on the right.
-  - Being in `Saved Profiles` does not mean the profile is correct; it simply means it is saved.
+  - Appearing in `Saved Profiles` only means that the profile name is saved in the app; it does not guarantee that the profile is valid or currently usable. Click `Verify` to check its status and connection to Apple services.
 
 ## Starting Signing and Notarization
 
@@ -92,7 +94,7 @@ You can customize a DMG disk quickly and easily using DKST macOS Notary Tool.
     1. **Template 2**: Layout with the app icon at the top and the Applications folder at the bottom.
        <div align="center"><img src="Docs/Screenshot-DMG-Layout-01.png" alt="Template 2" width="550"><br></div>
     1. When selecting a template, a prompt such as `Edit DMG-BG-TEMP.psd in this project.` opens the background PSD stored inside the `.dnt` project. Save your edits to the PSD and it will be converted to PNG automatically during the build.
-    1. If you did not select `Put Installer Package in DMG` or `Add Applications Shortcut`, a separate layout with the app or .PKG icon in the center will be selected. You can also open a Photoshop (.PSD) file helpful for background editing in this case.
+    1. If you select `Put Installer Package in DMG` or do not select `Add Applications Shortcut`, a separate layout with the app or .PKG icon in the center will be selected. You can also open a Photoshop (.PSD) file helpful for background editing in this case.
        <div align="center"><img src="Docs/Screenshot-DMG-Layout-02.png" alt="Template 2" width="550"><br></div>
 5. **Add Applications Shortcut**: Select whether to display the Applications folder.
 
@@ -123,10 +125,10 @@ Since this file saves the app bundle's location using a relative path based on y
   <a href="https://github.com/sponsors/DINKIssTyle">
     <img src="https://img.shields.io/badge/Sponsor-EA4AAA?style=for-the-badge&logo=github-sponsors&logoColor=white" alt="Sponsor">
   </a>
-  <br> If you want this project to continue without worrying about your wife noticing! Please click the button above!
+  <br> If you'd like to keep this project alive without me getting the side-eye from my wife, click the button above!
 </p><br>
 
 <div align="center">
   <a href="https://github.com/DINKIssTyle/DINKIssTyle-Markdown-Browser" target="_blank"><img src="https://github.com/DINKIssTyle/DINKIssTyle-Markdown-Browser/blob/main/DKST-Markdown.png?raw=true" width="150"></a><br>
-This README.md file was written in DKST Markdown.<br>If you are interested in a markdown editor assisted by AI, please click the badge.<br><br>
+This README-en-US.md file was written in DKST Markdown.<br>If you are interested in a markdown editor assisted by AI, please click the badge.<br><br>
 </div>

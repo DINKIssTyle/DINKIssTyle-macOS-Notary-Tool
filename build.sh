@@ -122,7 +122,7 @@ cat <<EOF > "$APP_BUNDLE/Contents/Info.plist"
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSHumanReadableCopyright</key>
-    <string>Copyright (C) 2026 DINKI'ssTyle. All rights reserved.</string>
+    <string>Copyright © 2026 DINKI'ssTyle.</string>
     <key>CFBundleIconFile</key>
     <string>$ICON_FILE</string>
     <key>CFBundleDocumentTypes</key>
