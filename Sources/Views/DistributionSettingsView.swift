@@ -232,6 +232,7 @@ private struct InstallerPageEditorSheet: View {
     @Environment(\.dismiss) private var dismiss
     let pageTitle: String
     let onSave: (String, Data?) -> Void
+    @StateObject private var editingContext = RichTextEditingContext()
     @State private var draftText: String
     @State private var draftRTFData: Data?
 
@@ -253,11 +254,13 @@ private struct InstallerPageEditorSheet: View {
                 .font(.title3)
                 .fontWeight(.semibold)
 
-            Text("RTF and RTFD are supported, including formatted text and embedded images.")
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
+            RichTextFormattingToolbar(context: editingContext)
 
-            RichTextEditor(text: $draftText, rtfData: $draftRTFData)
+            RichTextEditor(
+                text: $draftText,
+                rtfData: $draftRTFData,
+                editingContext: editingContext
+            )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(Color(NSColor.textBackgroundColor))
                 .clipShape(RoundedRectangle(cornerRadius: 7))
@@ -280,7 +283,7 @@ private struct InstallerPageEditorSheet: View {
             }
         }
         .padding(20)
-        .frame(minWidth: 720, idealWidth: 780, minHeight: 500, idealHeight: 560)
+        .frame(minWidth: 900, idealWidth: 1020, minHeight: 520, idealHeight: 600)
         .interactiveDismissDisabled()
     }
 }

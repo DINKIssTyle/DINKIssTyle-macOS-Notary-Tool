@@ -5,6 +5,7 @@ struct RichTextEditor: NSViewRepresentable {
     @Binding var text: String
     @Binding var rtfData: Data?
     var isEditable = true
+    var editingContext: RichTextEditingContext?
 
     func makeCoordinator() -> Coordinator {
         Coordinator(parent: self)
@@ -38,6 +39,7 @@ struct RichTextEditor: NSViewRepresentable {
         scrollView.documentView = textView
 
         context.coordinator.applyModel(to: textView, text: text, rtfData: rtfData)
+        editingContext?.connect(to: textView)
         return scrollView
     }
 
@@ -45,9 +47,16 @@ struct RichTextEditor: NSViewRepresentable {
         context.coordinator.parent = self
         guard let textView = scrollView.documentView as? NSTextView else { return }
         textView.isEditable = isEditable
+        editingContext?.connect(to: textView)
         if rtfData != context.coordinator.lastRTFData || (rtfData == nil && textView.string != text) {
             context.coordinator.applyModel(to: textView, text: text, rtfData: rtfData)
+            editingContext?.refresh(from: textView)
         }
+    }
+
+    static func dismantleNSView(_ scrollView: NSScrollView, coordinator: Coordinator) {
+        guard let textView = scrollView.documentView as? NSTextView else { return }
+        coordinator.parent.editingContext?.disconnect(from: textView)
     }
 
     final class Coordinator: NSObject, NSTextViewDelegate {
@@ -95,6 +104,12 @@ struct RichTextEditor: NSViewRepresentable {
             lastRTFData = data
             parent.text = textView.string
             parent.rtfData = data
+            parent.editingContext?.refresh(from: textView)
+        }
+
+        func textViewDidChangeSelection(_ notification: Notification) {
+            guard !isApplyingModel, let textView = notification.object as? NSTextView else { return }
+            parent.editingContext?.refresh(from: textView)
         }
 
         private func attributedString(from data: Data) -> NSAttributedString? {

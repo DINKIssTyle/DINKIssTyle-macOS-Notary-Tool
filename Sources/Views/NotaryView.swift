@@ -1,6 +1,16 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
+private final class NotaryInputOpenPanelDelegate: NSObject, NSOpenSavePanelDelegate {
+    func panel(_ sender: Any, shouldEnable url: URL) -> Bool {
+        let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isPackageKey])
+        if values?.isDirectory == true, values?.isPackage != true {
+            return true
+        }
+        return ["app", "pkg", "dnt"].contains(url.pathExtension.lowercased())
+    }
+}
+
 enum WorkflowActionPresentation {
     static func title(
         isApp: Bool,
@@ -192,38 +202,42 @@ struct NotaryView: View {
                         .stroke(Color.secondary.opacity(0.15), lineWidth: 1)
                 )
             } else {
-                VStack(spacing: 10) {
-                    Image(systemName: "arrow.down.doc.fill")
-                        .font(.system(size: 28))
-                        .foregroundStyle(isTargeted ? .blue : .secondary)
-                    
-                    Text("Drag & Drop .app or .pkg")
-                        .font(.subheadline)
-                        .fontWeight(.semibold)
-                    
-                    Text("Supports macOS application bundle or installer package")
-                        .font(.system(size: 9))
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
+                Button(action: chooseNotaryTarget) {
+                    VStack(spacing: 10) {
+                        Image(systemName: "arrow.down.doc.fill")
+                            .font(.system(size: 28))
+                            .foregroundStyle(isTargeted ? .blue : .secondary)
+
+                        Text("Drag & Drop .app, .pkg, or .dnt")
+                            .font(.subheadline)
+                            .fontWeight(.semibold)
+
+                        Text("or click to choose from Finder")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 20)
+                    .padding(.horizontal, 16)
+                    .background(isTargeted ? Color.blue.opacity(0.08) : Color(NSColor.controlBackgroundColor).opacity(0.3))
+                    .cornerRadius(12)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12)
+                            .stroke(isTargeted ? Color.blue : Color.secondary.opacity(0.2), style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round, dash: [4, 4]))
+                    )
                 }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 20)
-                .padding(.horizontal, 16)
-                .background(isTargeted ? Color.blue.opacity(0.08) : Color(NSColor.controlBackgroundColor).opacity(0.3))
-                .cornerRadius(12)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12)
-                        .stroke(isTargeted ? Color.blue : Color.secondary.opacity(0.2), style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round, dash: [4, 4]))
-                )
+                .buttonStyle(.plain)
+                .help("Choose a macOS app, installer package, or DKST Notary project")
                 .onDrop(of: ["public.file-url"], isTargeted: $isTargeted) { providers in
                     guard let provider = providers.first else { return false }
                     provider.loadItem(forTypeIdentifier: "public.file-url", options: nil) { data, error in
                         if let data = data as? Data,
                            let url = URL(dataRepresentation: data, relativeTo: nil) {
                             let ext = url.pathExtension.lowercased()
-                            if ext == "app" || ext == "pkg" {
+                            if ext == "app" || ext == "pkg" || ext == "dnt" {
                                 DispatchQueue.main.async {
-                                    self.selectedFile = url
+                                    self.openNotaryInput(url)
                                 }
                             }
                         }
@@ -231,6 +245,48 @@ struct NotaryView: View {
                     return true
                 }
             }
+        }
+    }
+
+    private func chooseNotaryTarget() {
+        let panel = NSOpenPanel()
+        let panelDelegate = NotaryInputOpenPanelDelegate()
+        panel.title = "Choose App, Installer Package, or Project"
+        panel.message = "Choose a macOS application (.app), installer package (.pkg), or DKST Notary project (.dnt)."
+        panel.prompt = "Choose"
+        panel.allowedContentTypes = [
+            .applicationBundle,
+            UTType(filenameExtension: "pkg"),
+            UTType(exportedAs: "com.dinkisstyle.notarytool.dnt-project", conformingTo: .package)
+        ].compactMap { $0 }
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.treatsFilePackagesAsDirectories = false
+        panel.delegate = panelDelegate
+
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        openNotaryInput(url)
+    }
+
+    private func openNotaryInput(_ url: URL) {
+        switch url.pathExtension.lowercased() {
+        case "app", "pkg":
+            guard isSupportedProjectTarget(url) else {
+                showProjectAlert(
+                    title: "Unsupported Target",
+                    message: "Choose an existing macOS application (.app) or installer package (.pkg)."
+                )
+                return
+            }
+            selectedFile = url
+        case "dnt":
+            openProjectArchive(url)
+        default:
+            showProjectAlert(
+                title: "Unsupported File",
+                message: "Choose a .app, .pkg, or .dnt file."
+            )
         }
     }
     
