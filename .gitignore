@@ -27,5 +27,3 @@ build_err.txt
 *.xcworkspace/
 xcuserdata/
 DerivedData/
-
-Tests/

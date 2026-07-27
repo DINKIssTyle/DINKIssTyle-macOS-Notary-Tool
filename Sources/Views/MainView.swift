@@ -42,12 +42,14 @@ struct EqualPanelSplitView<Leading: View, Trailing: View>: View {
 
 struct MainView: View {
     @EnvironmentObject private var documentOpenCoordinator: DocumentOpenCoordinator
+    @EnvironmentObject private var service: NotaryService
     @State private var selectedTab: Tab = .notarize
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     
     enum Tab: String, CaseIterable, Identifiable {
         case notarize = "Notarize"
         case credentials = "Notary Profiles"
+        case readiness = "System Readiness"
         
         var id: String { self.rawValue }
         
@@ -55,6 +57,7 @@ struct MainView: View {
             switch self {
             case .notarize: return "lock.shield.fill"
             case .credentials: return "key.fill"
+            case .readiness: return "wrench.and.screwdriver.fill"
             }
         }
     }
@@ -102,6 +105,16 @@ struct MainView: View {
                                 .frame(width: 20)
                             Text(tab.rawValue)
                                 .font(.body)
+
+                            Spacer()
+
+                            if tab == .readiness && service.hasSystemReadinessIssues {
+                                Image(systemName: "exclamationmark.circle.fill")
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundStyle(.orange)
+                                    .help("\(service.systemReadinessIssueCount) requirement(s) need attention")
+                                    .accessibilityLabel("\(service.systemReadinessIssueCount) requirements need attention")
+                            }
                         }
                         .padding(.vertical, 6)
                         .tag(tab)
@@ -135,6 +148,8 @@ struct MainView: View {
                     NotaryView()
                 case .credentials:
                     KeychainView()
+                case .readiness:
+                    SystemReadinessView()
                 }
             }
             .frame(
@@ -145,6 +160,9 @@ struct MainView: View {
             .background(Color(NSColor.windowBackgroundColor).opacity(0.85))
         }
         .navigationSplitViewStyle(.balanced)
+        .task {
+            await service.refreshSystemReadiness()
+        }
         .onReceive(documentOpenCoordinator.$request) { request in
             if request != nil {
                 selectedTab = .notarize

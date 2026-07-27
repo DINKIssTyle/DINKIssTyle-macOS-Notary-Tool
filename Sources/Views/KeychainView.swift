@@ -245,6 +245,10 @@ struct KeychainView: View {
         }
         
         self.profiles = loadedLocal
+
+        Task {
+            await service.refreshSystemReadiness()
+        }
     }
     
     private func registerProfile() async {

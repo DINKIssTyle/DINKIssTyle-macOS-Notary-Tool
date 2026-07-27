@@ -60,6 +60,7 @@ struct NotaryView: View {
     
     // File drop state
     @State private var selectedFile: URL? = nil
+    @State private var selectedFileIcon: NSImage? = nil
     @State private var isTargeted: Bool = false
     
     // Core parameters
@@ -129,8 +130,6 @@ struct NotaryView: View {
             .background(Color(NSColor.underPageBackgroundColor).opacity(0.4))
         }
         .onAppear {
-            service.refreshKeychainProfiles()
-            service.fetchCertificates()
             handlePendingDocumentRequest(documentOpenCoordinator.request)
         }
         .onChange(of: selectedFile) { file in
@@ -170,9 +169,20 @@ struct NotaryView: View {
         Group {
             if let file = selectedFile {
                 HStack(spacing: 12) {
-                    Image(systemName: file.pathExtension.lowercased() == "pkg" ? "shippingbox.fill" : "macwindow.on.rectangle")
-                        .font(.system(size: 32))
-                        .foregroundStyle(.blue)
+                    Group {
+                        if let selectedFileIcon {
+                            Image(nsImage: selectedFileIcon)
+                                .resizable()
+                                .scaledToFit()
+                                .accessibilityLabel(Text("\(file.lastPathComponent) icon"))
+                        } else {
+                            Image(systemName: file.pathExtension.lowercased() == "pkg" ? "shippingbox.fill" : "macwindow.on.rectangle")
+                                .resizable()
+                                .scaledToFit()
+                                .foregroundStyle(.blue)
+                        }
+                    }
+                    .frame(width: 42, height: 42)
                     
                     VStack(alignment: .leading, spacing: 2) {
                         Text(file.lastPathComponent)
@@ -621,6 +631,7 @@ struct NotaryView: View {
                 }
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
         .background(Color(NSColor.controlBackgroundColor).opacity(0.4))
         .cornerRadius(10)
@@ -704,7 +715,7 @@ struct NotaryView: View {
                 .stroke(Color.secondary.opacity(0.15), lineWidth: 1)
         )
     }
-    
+
     private var consoleOutputView: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
@@ -786,7 +797,7 @@ struct NotaryView: View {
                 .foregroundStyle(.red))
         }
     }
-    
+
     private var isStartDisabled: Bool {
         guard let selectedFile else { return true }
         let isApp = selectedFile.pathExtension.lowercased() == "app"
@@ -884,6 +895,7 @@ struct NotaryView: View {
         projectSaveTask?.cancel()
         projectIsReady = false
         resetWorkflowState()
+        selectedFileIcon = file.map { NSWorkspace.shared.icon(forFile: $0.path) }
         distributionAssets = [:]
         hasProjectArchive = false
         projectStatus = ""

@@ -52,6 +52,28 @@ public struct VerificationItem: Identifiable, Sendable, Codable {
     }
 }
 
+public enum SystemReadinessStatus: String, Sendable {
+    case checking
+    case ready
+    case attention
+    case unavailable
+}
+
+public struct SystemReadinessItem: Identifiable, Sendable {
+    public let id: String
+    public let title: String
+    public let description: String
+    public let resolution: String?
+    public let status: SystemReadinessStatus
+}
+
+private struct SystemToolReadiness: Sendable {
+    let notarizationToolsAvailable: Bool
+    let missingNotarizationTools: [String]
+    let distributionToolsAvailable: Bool
+    let missingDistributionTools: [String]
+}
+
 public enum CredentialType: String, Sendable, Codable {
     case keychainProfile = "Keychain Profile"
     case apiKey = "App Store Connect API Key"
@@ -84,6 +106,20 @@ public class NotaryService: ObservableObject {
     
     // Available notary profiles loaded from keychain
     @Published public var keychainProfiles: [String] = []
+
+    // Local tools and credentials required by the signing/notarization workflows
+    @Published public var systemReadinessItems: [SystemReadinessItem] = []
+    @Published public var isCheckingSystemReadiness: Bool = false
+
+    public var systemReadinessIssueCount: Int {
+        systemReadinessItems.filter {
+            $0.status == .attention || $0.status == .unavailable
+        }.count
+    }
+
+    public var hasSystemReadinessIssues: Bool {
+        systemReadinessIssueCount > 0
+    }
     
     // Verification results
     @Published public var verificationItems: [VerificationItem] = [
@@ -99,6 +135,154 @@ public class NotaryService: ObservableObject {
     public init() {
         fetchCertificates()
         refreshKeychainProfiles()
+    }
+
+    public func refreshSystemReadiness() async {
+        guard !isCheckingSystemReadiness else { return }
+
+        isCheckingSystemReadiness = true
+        systemReadinessItems = Self.readinessPlaceholders
+
+        let toolReadiness = await Task.detached(priority: .userInitiated) {
+            Self.evaluateSystemTools()
+        }.value
+
+        fetchCertificates()
+        refreshKeychainProfiles()
+
+        let notarizationDescription: String
+        if toolReadiness.notarizationToolsAvailable {
+            notarizationDescription = "Xcode Command Line Tools, notarytool, and stapler are available."
+        } else {
+            notarizationDescription = "Missing: \(toolReadiness.missingNotarizationTools.joined(separator: ", ")). Install or select Xcode Command Line Tools."
+        }
+
+        let distributionDescription: String
+        if toolReadiness.distributionToolsAvailable {
+            distributionDescription = "Signing, package, disk image, archive, and Gatekeeper tools are available."
+        } else {
+            distributionDescription = "Missing: \(toolReadiness.missingDistributionTools.joined(separator: ", "))."
+        }
+
+        let appCertificateDescription = appIdentities.isEmpty
+            ? "No Developer ID Application certificate with a private key was found."
+            : "\(appIdentities.count) Developer ID Application certificate(s) available."
+        let installerCertificateDescription = installerIdentities.isEmpty
+            ? "No Developer ID Installer certificate found. It is only required for signed PKG builds."
+            : "\(installerIdentities.count) Developer ID Installer certificate(s) available."
+        let credentialDescription = keychainProfiles.isEmpty
+            ? "No saved notary profile found. You can also enter an App Store Connect API key."
+            : "\(keychainProfiles.count) saved notary profile(s) available."
+
+        systemReadinessItems = [
+            SystemReadinessItem(
+                id: "notarization-tools",
+                title: "Apple Notarization Tools",
+                description: notarizationDescription,
+                resolution: toolReadiness.notarizationToolsAvailable
+                    ? nil
+                    : "Install Xcode from the App Store, then open it once to install its components. If Xcode is already installed, select it with “sudo xcode-select --switch /Applications/Xcode.app” and accept the license with “sudo xcodebuild -license”.",
+                status: toolReadiness.notarizationToolsAvailable ? .ready : .unavailable
+            ),
+            SystemReadinessItem(
+                id: "distribution-tools",
+                title: "macOS Distribution Tools",
+                description: distributionDescription,
+                resolution: toolReadiness.distributionToolsAvailable
+                    ? nil
+                    : "Install the latest macOS updates and Xcode Command Line Tools. You can request the tools installer with “xcode-select --install”, then run this check again.",
+                status: toolReadiness.distributionToolsAvailable ? .ready : .unavailable
+            ),
+            SystemReadinessItem(
+                id: "application-certificate",
+                title: "Application Signing Certificate",
+                description: appCertificateDescription,
+                resolution: appIdentities.isEmpty
+                    ? "Create or download a Developer ID Application certificate from your Apple Developer account. Import both the certificate and its private key into the login keychain with Keychain Access."
+                    : nil,
+                status: appIdentities.isEmpty ? .attention : .ready
+            ),
+            SystemReadinessItem(
+                id: "installer-certificate",
+                title: "Installer Signing Certificate",
+                description: installerCertificateDescription,
+                resolution: installerIdentities.isEmpty
+                    ? "If you plan to build and notarize PKG installers, create a Developer ID Installer certificate in your Apple Developer account and import it with its private key into Keychain Access."
+                    : nil,
+                status: installerIdentities.isEmpty ? .attention : .ready
+            ),
+            SystemReadinessItem(
+                id: "notary-credentials",
+                title: "Notary Credentials",
+                description: credentialDescription,
+                resolution: keychainProfiles.isEmpty
+                    ? "Open Notary Profiles in the sidebar and register or link a keychain profile. Alternatively, enter an App Store Connect API key in the Notarize workflow."
+                    : nil,
+                status: keychainProfiles.isEmpty ? .attention : .ready
+            )
+        ]
+        isCheckingSystemReadiness = false
+    }
+
+    private static let readinessPlaceholders: [SystemReadinessItem] = [
+        SystemReadinessItem(id: "notarization-tools", title: "Apple Notarization Tools", description: "Checking Xcode and Apple notary tools…", resolution: nil, status: .checking),
+        SystemReadinessItem(id: "distribution-tools", title: "macOS Distribution Tools", description: "Checking signing and packaging tools…", resolution: nil, status: .checking),
+        SystemReadinessItem(id: "application-certificate", title: "Application Signing Certificate", description: "Checking the system keychain…", resolution: nil, status: .checking),
+        SystemReadinessItem(id: "installer-certificate", title: "Installer Signing Certificate", description: "Checking the system keychain…", resolution: nil, status: .checking),
+        SystemReadinessItem(id: "notary-credentials", title: "Notary Credentials", description: "Checking saved keychain profiles…", resolution: nil, status: .checking)
+    ]
+
+    nonisolated private static func evaluateSystemTools() -> SystemToolReadiness {
+        var missingNotarizationTools: [String] = []
+
+        do {
+            let (status, _) = try ShellManager.shared.runSync(
+                executable: "/usr/bin/xcode-select",
+                arguments: ["-p"]
+            )
+            if status != 0 {
+                missingNotarizationTools.append("Xcode Command Line Tools")
+            }
+        } catch {
+            missingNotarizationTools.append("Xcode Command Line Tools")
+        }
+
+        for tool in ["notarytool", "stapler"] {
+            do {
+                let (status, _) = try ShellManager.shared.runSync(
+                    executable: "/usr/bin/xcrun",
+                    arguments: ["--find", tool]
+                )
+                if status != 0 {
+                    missingNotarizationTools.append(tool)
+                }
+            } catch {
+                missingNotarizationTools.append(tool)
+            }
+        }
+
+        let distributionToolPaths = [
+            "/usr/bin/codesign",
+            "/usr/bin/ditto",
+            "/usr/bin/hdiutil",
+            "/usr/bin/pkgbuild",
+            "/usr/bin/productbuild",
+            "/usr/bin/security",
+            "/usr/sbin/pkgutil",
+            "/usr/sbin/spctl"
+        ]
+        let missingDistributionTools = distributionToolPaths.compactMap { path in
+            FileManager.default.isExecutableFile(atPath: path)
+                ? nil
+                : URL(fileURLWithPath: path).lastPathComponent
+        }
+
+        return SystemToolReadiness(
+            notarizationToolsAvailable: missingNotarizationTools.isEmpty,
+            missingNotarizationTools: missingNotarizationTools,
+            distributionToolsAvailable: missingDistributionTools.isEmpty,
+            missingDistributionTools: missingDistributionTools
+        )
     }
     
     /// Fetches valid code signing identities from the system keychain.
