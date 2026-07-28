@@ -138,7 +138,35 @@ struct DiskImageLayoutPreset: Equatable, Sendable {
     let applicationsIconY: Int
 }
 
+enum InstallerScriptKind: String, Identifiable, Sendable {
+    case preinstall
+    case postinstall
+
+    var id: String { rawValue }
+    var fileName: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .preinstall: return "Pre-install Script"
+        case .postinstall: return "Post-install Script"
+        }
+    }
+
+    var defaultSource: String {
+        let timing = self == .preinstall ? "before" : "after"
+        return """
+        #!/bin/sh
+        set -e
+
+        # Runs \(timing) the app payload is installed.
+
+        exit 0
+        """
+    }
+}
+
 public struct InstallerSettings: Codable, Equatable, Sendable {
+    public var notarize = true
     public var title = ""
     public var identifier = ""
     public var version = ""
@@ -163,20 +191,28 @@ public struct InstallerSettings: Codable, Equatable, Sendable {
 
     public var installationDomain: InstallerInstallationDomain = .localSystem
     public var installLocation = "/Applications"
+    public var includePreinstallScript = false
+    public var preinstallScript: String?
+    public var includePostinstallScript = false
+    public var postinstallScript: String?
 
     public init() {}
 
     private enum CodingKeys: String, CodingKey {
+        case notarize
         case title, identifier, version
         case showWelcome, welcomeText, welcomeRTF, showReadMe, readMeText, readMeRTF
         case showLicense, licenseText, licenseRTF, showConclusion, conclusionText, conclusionRTF
         case backgroundAssetName, backgroundAlignment, backgroundScaling, conclusionAction
         case installationDomain, installLocation
+        case includePreinstallScript, preinstallScript
+        case includePostinstallScript, postinstallScript
     }
 
     public init(from decoder: Decoder) throws {
         self.init()
         let values = try decoder.container(keyedBy: CodingKeys.self)
+        notarize = try values.decodeIfPresent(Bool.self, forKey: .notarize) ?? notarize
         title = try values.decodeIfPresent(String.self, forKey: .title) ?? title
         identifier = try values.decodeIfPresent(String.self, forKey: .identifier) ?? identifier
         version = try values.decodeIfPresent(String.self, forKey: .version) ?? version
@@ -198,12 +234,19 @@ public struct InstallerSettings: Codable, Equatable, Sendable {
         conclusionAction = try values.decodeIfPresent(InstallerConclusionAction.self, forKey: .conclusionAction) ?? conclusionAction
         installationDomain = try values.decodeIfPresent(InstallerInstallationDomain.self, forKey: .installationDomain) ?? installationDomain
         installLocation = try values.decodeIfPresent(String.self, forKey: .installLocation) ?? installLocation
+        includePreinstallScript = try values.decodeIfPresent(Bool.self, forKey: .includePreinstallScript) ?? includePreinstallScript
+        preinstallScript = try values.decodeIfPresent(String.self, forKey: .preinstallScript)
+        includePostinstallScript = try values.decodeIfPresent(Bool.self, forKey: .includePostinstallScript) ?? includePostinstallScript
+        postinstallScript = try values.decodeIfPresent(String.self, forKey: .postinstallScript)
     }
 }
 
 public struct DiskImageSettings: Codable, Equatable, Sendable {
     public var layoutTemplate: DiskImageLayoutTemplate = .custom
     public var volumeName = ""
+    public var notarize = true
+    public var signDiskImage = true
+    public var signingIdentity = ""
     public var windowWidth = 660
     public var windowHeight = 400
     public var iconSize = 96
@@ -238,7 +281,8 @@ public struct DiskImageSettings: Codable, Equatable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case layoutTemplate
-        case volumeName, windowWidth, windowHeight, iconSize
+        case volumeName, notarize, signDiskImage, signingIdentity
+        case windowWidth, windowHeight, iconSize
         case includeInstallerPackage, centerAppIcon, appIconX, appIconY
         case includeApplicationsLink, applicationsIconX, applicationsIconY
         case backgroundAssetName, volumeIconAssetName
@@ -249,6 +293,9 @@ public struct DiskImageSettings: Codable, Equatable, Sendable {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         layoutTemplate = try values.decodeIfPresent(DiskImageLayoutTemplate.self, forKey: .layoutTemplate) ?? .custom
         volumeName = try values.decodeIfPresent(String.self, forKey: .volumeName) ?? volumeName
+        notarize = try values.decodeIfPresent(Bool.self, forKey: .notarize) ?? notarize
+        signDiskImage = try values.decodeIfPresent(Bool.self, forKey: .signDiskImage) ?? signDiskImage
+        signingIdentity = try values.decodeIfPresent(String.self, forKey: .signingIdentity) ?? signingIdentity
         windowWidth = try values.decodeIfPresent(Int.self, forKey: .windowWidth) ?? windowWidth
         windowHeight = try values.decodeIfPresent(Int.self, forKey: .windowHeight) ?? windowHeight
         iconSize = try values.decodeIfPresent(Int.self, forKey: .iconSize) ?? iconSize
@@ -265,7 +312,7 @@ public struct DiskImageSettings: Codable, Equatable, Sendable {
 }
 
 public struct DistributionProject: Codable, Equatable, Sendable {
-    public static let currentFormatVersion = 3
+    public static let currentFormatVersion = 5
 
     public var formatVersion = DistributionProject.currentFormatVersion
     public var targetRelativePath: String?
@@ -278,6 +325,49 @@ public struct DistributionProject: Codable, Equatable, Sendable {
     public var diskImage = DiskImageSettings()
 
     public init() {}
+}
+
+enum DistributionArtifact: String, Equatable {
+    case app
+    case installerPackage
+    case diskImage
+}
+
+enum DistributionPipelinePolicy {
+    static func diskImagePayload(buildInstaller: Bool) -> DistributionArtifact {
+        buildInstaller ? .installerPackage : .app
+    }
+
+    static func zipPayload(
+        buildInstaller: Bool,
+        buildDiskImage: Bool
+    ) -> DistributionArtifact {
+        if buildDiskImage {
+            return .diskImage
+        }
+        if buildInstaller {
+            return .installerPackage
+        }
+        return .app
+    }
+}
+
+enum DiskImageLayoutPolicy {
+    static func includesApplicationsLinkAfterInstallerToggle(
+        includesInstaller: Bool
+    ) -> Bool {
+        !includesInstaller
+    }
+
+    static func availableTemplates(
+        includesInstaller: Bool,
+        includesApplicationsLink: Bool
+    ) -> [DiskImageLayoutTemplate] {
+        if includesInstaller || !includesApplicationsLink {
+            return [.template1, .custom]
+        }
+        return Array(DiskImageLayoutTemplate.allCases)
+    }
 }
 
 public struct LoadedDistributionProject {
@@ -416,10 +506,9 @@ public enum DistributionProjectArchive {
 
     public static func dmgTemplateName(
         for settings: DiskImageSettings,
-        canUseInstallerPackage: Bool = true
+        canUseInstallerPackage: Bool = false
     ) -> String? {
-        let singleIcon = (settings.includeInstallerPackage && canUseInstallerPackage)
-            || !settings.includeApplicationsLink
+        let singleIcon = canUseInstallerPackage || !settings.includeApplicationsLink
         switch settings.layoutTemplate {
         case .template1: return singleIcon ? "DMG-BG-TEMP0.psd" : "DMG-BG-TEMP1.psd"
         case .template2: return "DMG-BG-TEMP2.psd"
@@ -489,10 +578,11 @@ public enum DistributionProjectArchive {
 
     private static func loadProject(from directory: URL) throws -> LoadedDistributionProject {
         let manifestURL = directory.appendingPathComponent(manifestName)
-        let project = try JSONDecoder().decode(DistributionProject.self, from: Data(contentsOf: manifestURL))
-        guard project.formatVersion == DistributionProject.currentFormatVersion else {
+        var project = try JSONDecoder().decode(DistributionProject.self, from: Data(contentsOf: manifestURL))
+        guard (3...DistributionProject.currentFormatVersion).contains(project.formatVersion) else {
             throw CocoaError(.fileReadUnsupportedScheme)
         }
+        project.formatVersion = DistributionProject.currentFormatVersion
 
         var assets: [DistributionAssetKind: URL] = [:]
         for kind in DistributionAssetKind.allCases {

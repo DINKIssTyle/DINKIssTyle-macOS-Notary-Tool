@@ -50,9 +50,11 @@
 <div align="center"><img src="Docs/Screenshot-Main-Part-02.png" alt="메인화면" width="600"><br><br></div>
 
 
-- **Code Signing**: 을 켜고 선택한 `Developer ID Applications` 인증서로 서명 합니다.
-- **Notarization**: 서명 후 최종 공증까지 합니다.
-- **Notary Credentials**: 공증에 사용할 `Notary Profiles` 을 선택합니다.
+- **Application Processing**:
+  - **Preserve Existing**은 Xcode에서 내보낸 앱의 기존 서명과 스테이플된 공증 티켓을 검증하고 앱을 수정하지 않습니다.
+  - **Re-sign App**은 선택한 `Developer ID Application` 인증서로 앱을 다시 서명하며, 공증이 켜져 있으면 앱도 다시 공증합니다.
+- **대상별 공증**: 전역 공증 스위치 대신 앱, PKG, DMG 영역에서 각각 공증 여부를 선택합니다. Preserve Existing에서 기존 앱 티켓 검증이 실패하면 앱을 자동으로 변경하거나 재공증하지 않고 작업을 중단합니다.
+- **Notarization Account**: 마지막으로 사용한 Keychain 공증 프로필을 자동으로 사용합니다. 다른 계정이나 API Key가 필요할 때만 **Change…**를 누릅니다.
 
 
 `Sign & Notarize` 버튼을 클릭한 후, 서명 및 공증이 완료될 때까지 기다려 주세요. 작업이 완료되면 오른쪽의 `Verification Checklist Report`에 서명 및 공증 검증 상태가 표시됩니다.
@@ -70,6 +72,7 @@ DKST macOS Notary Tool에서 간단하지만 빠르게 PKG를 사용자화 할 �
 <div align="center"><img src="Docs/Screenshot-Main-Part-04.png" alt="메인화면" width="300"><br><img src="Docs/Screenshot-Main-Part-05.png" alt="메인화면" width="300"><br><br></div>
 
 1. **Build Installer (.pkg)** 를 켜주세요.
+1. 배포할 PKG를 서명·공증하려면 **Sign & Notarize PKG**를 켜주세요.
 1. `Developer ID Installer` 인증서를 선택해주세요.  
    앱이 이미 공증되어 있고 변경이 없어도, .pkg 재생성마다 .pkg를 다시 공증 받아야 합니다.
 1. **Installer Title**: 인스톨러에 사용되는 타이틀바 이름을 입력합니다. 앱번들 내용을 자동삽입하지만, 원하는 경우 변경하세요.
@@ -96,14 +99,16 @@ DKST macOS Notary Tool에서 간단하지만 빠르게 DMG 디스크를 사용�
 <div align="center"><img src="Docs/Screenshot-Main-Part-06.png" alt="메인화면" width="300"><br><br></div>
 
 1. **Build Disk Image (.dmg)** 를 켜주세요.
-1. **Put Installer Package in DMG** 를 체크하면, 선행으로 생성한 .PKG 파일을 .DMG 디스크 내용으로 사용할 수 있습니다.
+1. 배포할 DMG를 공증하려면 **Sign & Notarize DMG**를 켜주세요.
+1. **Sign Disk Image**에서 DMG 서명에 사용할 `Developer ID Application` 인증서를 선택해 주세요. DMG 공증 시 서명은 필수이며 앱 서명과 독립적으로 처리됩니다.
+1. **Build Installer (.pkg)**도 켜져 있으면 먼저 생성한 PKG가 DMG 안에 자동으로 들어갑니다. PKG가 꺼져 있으면 앱 번들이 DMG에 들어갑니다.
 1. **Volume Name** 마운트 된 DMG 디스크 볼륨의 이름입니다. 원하는 것으로 수정할 수 있습니다.
 1. **Layout Preset**: 2가지 프리셋과 수동 레이아웃을 선택할수 있습니다.
     1. **Template 1**: 좌측에 앱 아이콘, 우측에 Applications 폴더가 위치한 레이아웃입니다.
     1. **Template 2**: 상단에 앱 아이콘, 하단에 Applications 폴더가 위차한 레이아웃입니다.
        <div align="center"><img src="Docs/Screenshot-DMG-Layout-01.png" alt="Template 2" width="550"><br></div>
     1. Template 을 선택하면 `Edit DMG-BG-TEMP.psd in this project.`와 같이 해당 레이아웃의 배경 PSD를 여는 안내문이 표시됩니다. PSD는 `.dnt` 프로젝트 안에 저장되며, 편집 내용을 저장하면 빌드할 때 자동으로 PNG로 변환되어 사용됩니다.
-    1. 만약, `Put Installer Package in DMG` 을 선택하거나, `Add Applications Shortcut` 선택을 하지 않았을 경우 중앙에 앱 또는 .PKG 아이콘이 있는 별도의 레이아웃이 선택됩니다. 이 경우에도 배경 편집에 도움이 되는 Photoshop (.PSD)파일을 열수 있습니다.
+    1. PKG 빌드가 켜져 있거나 `Add Applications Shortcut`을 선택하지 않았을 경우 중앙에 앱 또는 PKG 아이콘이 있는 단일 항목 레이아웃이 선택됩니다. 이 경우에도 배경 편집에 도움이 되는 Photoshop (.PSD) 파일을 열 수 있습니다.
        <div align="center"><img src="Docs/Screenshot-DMG-Layout-02.png" alt="Template 2" width="550"><br></div>
 1. **Add Applications Shortcut**: Applications 폴더를 보일지 선택합니다.
 
@@ -111,7 +116,12 @@ DKST macOS Notary Tool에서 간단하지만 빠르게 DMG 디스크를 사용�
 ## ZIP으로 배포하기
 서명 및 공증이 완료된 앱의 서명이나 공증은 압축 과정에서 쉽게 손상되지 않지만, 혹시 모를 손상을 방지하기 위해 Apple은 ditto를 이용한 압축을 권장합니다.  
 
-**Build Zip Archive (.zip)** 를 활성화하면 앱 번들이 ditto를 사용하여 압축된 .ZIP 파일로 압축됩니다.
+**Build Zip Archive (.zip)** 는 항상 마지막에 실행되며, 앞 단계에서 완성된 최종 산출물을 `ditto`로 압축합니다.
+
+- ZIP만 켜짐: 앱 번들을 ZIP으로 압축
+- PKG + ZIP: 완성된 PKG를 ZIP으로 압축
+- PKG + DMG + ZIP: PKG가 들어 있는 DMG를 만든 뒤, 그 DMG를 ZIP으로 압축
+- DMG + ZIP: 앱이 들어 있는 DMG를 만든 뒤, 그 DMG를 ZIP으로 압축
 
 
 ## 자동 저장과 불러오기에 관하여

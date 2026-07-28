@@ -1,6 +1,11 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
+private enum NotaryPreferenceKeys {
+    static let credentialType = "preferred_notary_credential_type"
+    static let keychainProfile = "preferred_notary_keychain_profile"
+}
+
 private final class NotaryInputOpenPanelDelegate: NSObject, NSOpenSavePanelDelegate {
     func panel(_ sender: Any, shouldEnable url: URL) -> Bool {
         let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isPackageKey])
@@ -11,46 +16,17 @@ private final class NotaryInputOpenPanelDelegate: NSObject, NSOpenSavePanelDeleg
     }
 }
 
-enum WorkflowActionPresentation {
-    static func title(
-        isApp: Bool,
-        signApp: Bool,
-        notarize: Bool,
-        hasDistribution: Bool
-    ) -> String {
-        guard isApp else {
-            return notarize ? "Notarize Package" : "Choose an Action"
-        }
-
-        if hasDistribution {
-            switch (signApp, notarize) {
-            case (true, true):
-                return "Sign, Notarize & Create Distribution"
-            case (true, false):
-                return "Sign & Create Distribution"
-            case (false, true):
-                return "Notarize & Create Distribution"
-            case (false, false):
-                return "Create Distribution"
-            }
-        }
-
-        switch (signApp, notarize) {
-        case (true, true):
-            return "Sign & Notarize"
-        case (true, false):
-            return "Sign App"
-        case (false, true):
-            return "Notarize App"
-        case (false, false):
-            return "Choose an Action"
-        }
-    }
-}
-
 enum WorkflowSigningPolicy {
     static func shouldSignInstaller(buildInstaller: Bool, notarize: Bool) -> Bool {
         buildInstaller && notarize
+    }
+
+    static func shouldSignDiskImage(
+        buildDiskImage: Bool,
+        notarize: Bool,
+        requested: Bool
+    ) -> Bool {
+        buildDiskImage && (notarize || requested)
     }
 }
 
@@ -64,8 +40,9 @@ struct NotaryView: View {
     @State private var isTargeted: Bool = false
     
     // Core parameters
-    @State private var signAppBundle: Bool = false
-    @State private var notarizeOutput: Bool = true
+    @State private var appProcessingMode: AppProcessingMode = .preserveExisting
+    @State private var notarizeApp: Bool = false
+    @State private var notarizeSelectedPackage: Bool = true
     @State private var selectedAppIdentity: String = ""
     
     @State private var distributionProject = DistributionProject()
@@ -87,11 +64,13 @@ struct NotaryView: View {
     @State private var credentialType: CredentialType = .keychainProfile
     @State private var selectedProfile: String = ""
     @State private var isAlreadySigned: Bool = false
+    @State private var signatureCheckCompleted: Bool = false
     
     // API Key credentials
     @State private var apiKeyId: String = ""
     @State private var apiIssuerId: String = ""
     @State private var apiKeyPath: String = ""
+    @State private var credentialsExpanded = false
     
     var body: some View {
         EqualPanelSplitView {
@@ -99,16 +78,17 @@ struct NotaryView: View {
             VStack(spacing: 16) {
                 fileDropArea
                 
-                if isAlreadySigned && selectedFile != nil {
-                    alreadySignedBanner
+                if selectedFile != nil {
+                    verificationBanner
                 }
                 
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
                         codeSignSection
-                        notarizationSection
                         packagingSection
-                        credentialsSection
+                        if requiresNotaryCredentials {
+                            credentialsSection
+                        }
                     }
                     .padding(.trailing, 2)
                 }
@@ -130,7 +110,24 @@ struct NotaryView: View {
             .background(Color(NSColor.underPageBackgroundColor).opacity(0.4))
         }
         .onAppear {
+            restoreNotaryCredentialPreference()
             handlePendingDocumentRequest(documentOpenCoordinator.request)
+        }
+        .onChange(of: service.keychainProfiles) { _ in
+            selectPreferredNotaryProfileIfNeeded()
+        }
+        .onChange(of: selectedProfile) { profile in
+            guard !profile.isEmpty else { return }
+            UserDefaults.standard.set(profile, forKey: NotaryPreferenceKeys.keychainProfile)
+        }
+        .onChange(of: credentialType) { type in
+            UserDefaults.standard.set(type.rawValue, forKey: NotaryPreferenceKeys.credentialType)
+            if type == .keychainProfile {
+                selectPreferredNotaryProfileIfNeeded()
+            }
+        }
+        .onChange(of: appProcessingMode) { mode in
+            notarizeApp = mode == .resignApp
         }
         .onChange(of: selectedFile) { file in
             let projectArchiveURL = pendingProjectArchiveURL
@@ -306,27 +303,43 @@ struct NotaryView: View {
         
         return VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Label("Code Signing", systemImage: "signature")
+                Label(isApp ? "Application Processing" : "Package Processing", systemImage: "signature")
                     .font(.subheadline)
                     .fontWeight(.semibold)
                 Spacer()
-                if isApp {
-                    Toggle("", isOn: $signAppBundle)
-                        .toggleStyle(.switch)
-                        .labelsHidden()
-                } else {
-                    Text("N/A for .pkg")
-                        .font(.system(size: 9))
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Color.secondary.opacity(0.12))
-                        .cornerRadius(4)
-                }
             }
-            
+
+            if isApp {
+                Picker("", selection: $appProcessingMode) {
+                    ForEach(AppProcessingMode.allCases) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+
+                Text(appProcessingMode == .preserveExisting
+                     ? "Keep the exported app untouched. Its existing signature and stapled notarization ticket must validate."
+                     : (notarizeApp
+                        ? "Re-sign and notarize the app again before creating distribution files."
+                        : "Re-sign the app before creating local distribution files."))
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Toggle("Notarize & Staple Selected PKG", isOn: $notarizeSelectedPackage)
+                    .font(.system(size: 10, weight: .medium))
+
+                Text("The existing package is submitted as-is. Its contents are not rebuilt or modified.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
+
             if isApp && signAppBundle {
                 VStack(alignment: .leading, spacing: 6) {
+                    Toggle("Notarize Re-signed App", isOn: $notarizeApp)
+                        .font(.system(size: 10, weight: .medium))
+
                     Text("Developer ID Application Cert")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
@@ -359,34 +372,6 @@ struct NotaryView: View {
         )
     }
 
-    private var notarizationSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Label("Notarization", systemImage: "checkmark.seal")
-                    .font(.subheadline)
-                    .fontWeight(.semibold)
-                Spacer()
-                Toggle("", isOn: $notarizeOutput)
-                    .toggleStyle(.switch)
-                    .labelsHidden()
-            }
-
-            Text(notarizeOutput
-                 ? "Reuse a valid existing app ticket, then notarize and staple newly created distribution files."
-                 : "Skip Apple notarization. Code signing and local distribution builds remain available.")
-                .font(.system(size: 10))
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .padding(12)
-        .background(Color(NSColor.controlBackgroundColor).opacity(0.4))
-        .cornerRadius(10)
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .stroke(Color.secondary.opacity(0.1), lineWidth: 1)
-        )
-    }
-    
     private var packagingSection: some View {
         let fileType = selectedFile?.pathExtension.lowercased() ?? "app"
         let isApp = fileType == "app"
@@ -422,6 +407,11 @@ struct NotaryView: View {
                     .buttonStyle(.plain)
                     Spacer()
                     if isApp {
+                        if packageToPkg {
+                            Text(notarizeInstaller ? "Sign + Notarize" : "Local")
+                                .font(.system(size: 8, weight: .medium))
+                                .foregroundStyle(notarizeInstaller ? Color.green : Color.secondary)
+                        }
                         Toggle("", isOn: $distributionProject.buildInstaller)
                             .toggleStyle(.switch)
                             .labelsHidden()
@@ -435,11 +425,14 @@ struct NotaryView: View {
                 
                 if isApp && packageToPkg && pkgOptionsExpanded {
                     VStack(alignment: .leading, spacing: 10) {
+                        Toggle(
+                            "Sign & Notarize PKG",
+                            isOn: $distributionProject.installer.notarize
+                        )
+                        .font(.system(size: 10, weight: .medium))
+
                         if shouldSignInstallerPackage {
                             VStack(alignment: .leading, spacing: 4) {
-                                Label("PKG signing is included with notarization", systemImage: "signature")
-                                    .font(.system(size: 10, weight: .medium))
-
                                 Text("Developer ID Installer Certificate")
                                     .font(.system(size: 9))
                                     .foregroundStyle(.secondary)
@@ -498,6 +491,11 @@ struct NotaryView: View {
                     .buttonStyle(.plain)
                     Spacer()
                     if isApp {
+                        if packageToDmg {
+                            Text(notarizeDiskImage ? "Sign + Notarize" : "Local")
+                                .font(.system(size: 8, weight: .medium))
+                                .foregroundStyle(notarizeDiskImage ? Color.green : Color.secondary)
+                        }
                         Toggle("", isOn: $distributionProject.buildDiskImage)
                             .toggleStyle(.switch)
                             .labelsHidden()
@@ -510,6 +508,66 @@ struct NotaryView: View {
                 }
 
                 if isApp && packageToDmg && dmgOptionsExpanded {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Toggle(
+                            "Sign & Notarize DMG",
+                            isOn: $distributionProject.diskImage.notarize
+                        )
+                        .font(.system(size: 10, weight: .medium))
+                        .onChange(of: distributionProject.diskImage.notarize) { enabled in
+                            if enabled {
+                                distributionProject.diskImage.signDiskImage = true
+                            }
+                        }
+
+                        HStack {
+                            Toggle(
+                                "Sign Disk Image",
+                                isOn: $distributionProject.diskImage.signDiskImage
+                            )
+                            .font(.system(size: 10, weight: .medium))
+                            .disabled(notarizeDiskImage)
+
+                            Spacer()
+
+                            if notarizeDiskImage {
+                                Text("Required for notarization")
+                                    .font(.system(size: 9))
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+
+                        if shouldSignDiskImage {
+                            Text("Developer ID Application Certificate")
+                                .font(.system(size: 9))
+                                .foregroundStyle(.secondary)
+
+                            if service.appIdentities.isEmpty {
+                                Text("No Developer ID Application certificates found in keychain.")
+                                    .font(.system(size: 9))
+                                    .foregroundStyle(.red)
+                            } else {
+                                Picker("", selection: $distributionProject.diskImage.signingIdentity) {
+                                    Text("Select certificate...").tag("")
+                                    ForEach(service.appIdentities, id: \.self) { cert in
+                                        Text(cert).tag(cert)
+                                    }
+                                }
+                                .pickerStyle(.menu)
+                                .labelsHidden()
+                                .controlSize(.small)
+                            }
+                        }
+
+                        Text("The disk image is signed independently. The app inside it is not re-signed or modified.")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.tertiary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(.leading, 12)
+
+                    Divider()
+
                     DiskImageCustomizationView(
                         settings: $distributionProject.diskImage,
                         canUseInstallerPackage: packageToPkg,
@@ -533,6 +591,11 @@ struct NotaryView: View {
                     .font(.system(size: 11, weight: .semibold))
                 Spacer()
                 if isApp {
+                    if packageToZip {
+                        Text("Contains \(zipPayloadLabel)")
+                            .font(.system(size: 8, weight: .medium))
+                            .foregroundStyle(Color.secondary)
+                    }
                     Toggle("", isOn: $distributionProject.buildZipArchive)
                         .toggleStyle(.switch)
                         .labelsHidden()
@@ -542,6 +605,12 @@ struct NotaryView: View {
                         .font(.system(size: 9))
                         .foregroundStyle(.secondary)
                 }
+            }
+            if isApp && packageToZip {
+                Text("Created last. The ZIP contains the final \(zipPayloadLabel) artifact.")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(12)
@@ -555,19 +624,37 @@ struct NotaryView: View {
     
     private var credentialsSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Label("Notary Credentials", systemImage: "key.viewfinder")
-                .font(.subheadline)
-                .fontWeight(.semibold)
+            HStack {
+                Label("Notarization Account", systemImage: "key.viewfinder")
+                    .font(.subheadline)
+                    .fontWeight(.semibold)
+                Spacer()
+                Button(credentialsExpanded ? "Done" : "Change…") {
+                    withAnimation {
+                        credentialsExpanded.toggle()
+                    }
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+            }
 
-            if !shouldPerformNotarization {
-                Label("Not required when notarization is disabled", systemImage: "key.slash")
+            if hasValidNotaryCredentials {
+                Label(notaryCredentialSummary, systemImage: "checkmark.circle.fill")
                     .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.secondary)
-
-                Text(localWorkflowCredentialNote)
-                    .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(.green)
             } else {
+                Label("Choose an account before starting", systemImage: "exclamationmark.triangle.fill")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.orange)
+            }
+
+            Text("Used for: \(notarizationTargetSummary)")
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+
+            if credentialsExpanded || !hasValidNotaryCredentials {
+                Divider()
+
                 Picker("Auth Type", selection: $credentialType) {
                     ForEach([CredentialType.keychainProfile, CredentialType.apiKey], id: \.self) { type in
                         Text(type.rawValue).tag(type)
@@ -629,6 +716,11 @@ struct NotaryView: View {
                         }
                     }
                 }
+            }
+        }
+        .onAppear {
+            if !hasValidNotaryCredentials {
+                credentialsExpanded = true
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -770,15 +862,45 @@ struct NotaryView: View {
     
     // MARK: - Helpers
 
+    private var signAppBundle: Bool { appProcessingMode == .resignApp }
     private var packageToPkg: Bool { distributionProject.buildInstaller }
     private var selectedPkgIdentity: String { distributionProject.installerIdentity }
     private var packageToDmg: Bool { distributionProject.buildDiskImage }
     private var packageToZip: Bool { distributionProject.buildZipArchive }
+    private var zipPayloadLabel: String {
+        switch DistributionPipelinePolicy.zipPayload(
+            buildInstaller: packageToPkg,
+            buildDiskImage: packageToDmg
+        ) {
+        case .app: return "APP"
+        case .installerPackage: return "PKG"
+        case .diskImage: return "DMG"
+        }
+    }
     private var shouldSignInstallerPackage: Bool {
         WorkflowSigningPolicy.shouldSignInstaller(
             buildInstaller: packageToPkg,
-            notarize: shouldPerformNotarization
+            notarize: notarizeInstaller
         )
+    }
+    private var shouldSignDiskImage: Bool {
+        WorkflowSigningPolicy.shouldSignDiskImage(
+            buildDiskImage: packageToDmg,
+            notarize: notarizeDiskImage,
+            requested: distributionProject.diskImage.signDiskImage
+        )
+    }
+    private var notarizeInstaller: Bool {
+        packageToPkg && distributionProject.installer.notarize
+    }
+    private var notarizeDiskImage: Bool {
+        packageToDmg && distributionProject.diskImage.notarize
+    }
+    private var notarizeDirectPackage: Bool {
+        selectedFile?.pathExtension.lowercased() == "pkg" && notarizeSelectedPackage
+    }
+    private var requiresNotaryCredentials: Bool {
+        notarizeApp || notarizeInstaller || notarizeDiskImage || notarizeDirectPackage
     }
     
     private func statusIcon(for status: VerificationStatus) -> some View {
@@ -803,7 +925,11 @@ struct NotaryView: View {
         let isApp = selectedFile.pathExtension.lowercased() == "app"
 
         if isApp {
-            guard signAppBundle || shouldPerformNotarization || hasDistributionSelection else { return true }
+            guard signAppBundle || requiresNotaryCredentials || hasDistributionSelection else { return true }
+
+            if appProcessingMode == .preserveExisting && !isAlreadySigned {
+                return true
+            }
 
             if signAppBundle && selectedAppIdentity.isEmpty {
                 return true
@@ -813,7 +939,11 @@ struct NotaryView: View {
                 return true
             }
 
-            if shouldPerformNotarization {
+            if shouldSignDiskImage && distributionProject.diskImage.signingIdentity.isEmpty {
+                return true
+            }
+
+            if requiresNotaryCredentials {
                 guard signAppBundle || isAlreadySigned else { return true }
                 return !hasValidNotaryCredentials
             }
@@ -821,7 +951,7 @@ struct NotaryView: View {
             return false
         }
 
-        guard shouldPerformNotarization else { return true }
+        guard notarizeDirectPackage else { return true }
         return !hasValidNotaryCredentials
     }
 
@@ -829,40 +959,59 @@ struct NotaryView: View {
         packageToPkg || packageToDmg || packageToZip
     }
 
-    private var shouldPerformNotarization: Bool {
-        selectedFile != nil && notarizeOutput
-    }
-
-    private var localWorkflowCredentialNote: String {
-        if signAppBundle && hasDistributionSelection {
-            return "The app will be signed and the selected distribution formats will be created locally."
-        }
-        if signAppBundle {
-            return "The app will be code signed without Apple notarization."
-        }
-        return "The selected distribution formats will be created locally without Apple notarization."
-    }
-
     private var hasValidNotaryCredentials: Bool {
         if credentialType == .keychainProfile {
-            return !selectedProfile.isEmpty
+            return service.keychainProfiles.contains(selectedProfile)
         }
         return !apiKeyId.isEmpty && !apiIssuerId.isEmpty && !apiKeyPath.isEmpty
     }
 
+    private var notaryCredentialSummary: String {
+        switch credentialType {
+        case .keychainProfile:
+            return "Keychain Profile: \(selectedProfile)"
+        case .apiKey:
+            return "App Store Connect API Key: \(apiKeyId)"
+        }
+    }
+
+    private var notarizationTargetSummary: String {
+        var targets: [String] = []
+        if notarizeApp { targets.append("re-signed app") }
+        if notarizeInstaller { targets.append("PKG") }
+        if notarizeDiskImage { targets.append("DMG") }
+        if notarizeDirectPackage { targets.append("selected PKG") }
+        return targets.joined(separator: ", ")
+    }
+
     private var actionButtonTitle: String {
         guard let selectedFile else { return "Choose an Action" }
-        return WorkflowActionPresentation.title(
-            isApp: selectedFile.pathExtension.lowercased() == "app",
-            signApp: signAppBundle,
-            notarize: shouldPerformNotarization,
-            hasDistribution: hasDistributionSelection
-        )
+        guard selectedFile.pathExtension.lowercased() == "app" else {
+            return notarizeDirectPackage ? "Notarize Selected PKG" : "Choose an Action"
+        }
+
+        let selectedOutputCount = [packageToPkg, packageToDmg, packageToZip].filter { $0 }.count
+        if selectedOutputCount == 1, packageToPkg {
+            return notarizeInstaller ? "Create & Notarize PKG" : "Create PKG"
+        }
+        if selectedOutputCount == 1, packageToDmg {
+            return notarizeDiskImage ? "Create & Notarize DMG" : "Create DMG"
+        }
+        if selectedOutputCount == 1, packageToZip {
+            return notarizeApp ? "Notarize App & Create ZIP" : "Create ZIP"
+        }
+        if selectedOutputCount > 1 {
+            return requiresNotaryCredentials ? "Create & Notarize Distribution" : "Create Distribution"
+        }
+        if signAppBundle {
+            return notarizeApp ? "Re-sign & Notarize App" : "Re-sign App"
+        }
+        return "Choose an Action"
     }
 
     private var actionButtonIcon: String {
         guard selectedFile != nil else { return "slider.horizontal.3" }
-        if shouldPerformNotarization {
+        if requiresNotaryCredentials {
             return "checkmark.seal.fill"
         }
         if hasDistributionSelection && !signAppBundle {
@@ -883,12 +1032,43 @@ struct NotaryView: View {
             self.apiKeyPath = url.path
         }
     }
+
+    private func restoreNotaryCredentialPreference() {
+        if let rawValue = UserDefaults.standard.string(forKey: NotaryPreferenceKeys.credentialType),
+           let savedType = CredentialType(rawValue: rawValue) {
+            credentialType = savedType
+        }
+        selectPreferredNotaryProfileIfNeeded()
+    }
+
+    private func selectPreferredNotaryProfileIfNeeded() {
+        guard credentialType == .keychainProfile else { return }
+        if service.keychainProfiles.contains(selectedProfile) {
+            return
+        }
+
+        let preferred = UserDefaults.standard.string(
+            forKey: NotaryPreferenceKeys.keychainProfile
+        )
+        if let preferred, service.keychainProfiles.contains(preferred) {
+            selectedProfile = preferred
+        } else if service.keychainProfiles.count == 1 {
+            selectedProfile = service.keychainProfiles[0]
+        } else {
+            selectedProfile = ""
+            if requiresNotaryCredentials {
+                credentialsExpanded = true
+            }
+        }
+    }
     
     private func resetWorkflowState() {
         service.clearLogs()
-        signAppBundle = false
-        notarizeOutput = true
+        appProcessingMode = .preserveExisting
+        notarizeApp = false
+        notarizeSelectedPackage = true
         isAlreadySigned = false
+        signatureCheckCompleted = false
     }
 
     private func loadWorkflow(for file: URL?, projectArchiveURL: URL? = nil) {
@@ -940,6 +1120,8 @@ struct NotaryView: View {
                 chooseInitialProjectLocationIfNeeded(for: file)
             }
         }
+
+        applySingleAvailableSigningIdentities()
 
         DispatchQueue.main.async {
             projectIsReady = true
@@ -1070,6 +1252,20 @@ struct NotaryView: View {
         project.installer.conclusionText = "\(appName) was installed successfully."
         project.diskImage.volumeName = appName
         return project
+    }
+
+    private func applySingleAvailableSigningIdentities() {
+        if selectedAppIdentity.isEmpty, service.appIdentities.count == 1 {
+            selectedAppIdentity = service.appIdentities[0]
+        }
+        if distributionProject.installerIdentity.isEmpty,
+           service.installerIdentities.count == 1 {
+            distributionProject.installerIdentity = service.installerIdentities[0]
+        }
+        if distributionProject.diskImage.signingIdentity.isEmpty,
+           service.appIdentities.count == 1 {
+            distributionProject.diskImage.signingIdentity = service.appIdentities[0]
+        }
     }
 
     private func scheduleProjectSave() {
@@ -1257,32 +1453,43 @@ struct NotaryView: View {
                 }
                 await MainActor.run {
                     self.isAlreadySigned = isValid
+                    self.signatureCheckCompleted = true
                 }
             } catch {
                 await MainActor.run {
                     self.isAlreadySigned = false
+                    self.signatureCheckCompleted = true
                 }
             }
         }
     }
     
-    private var alreadySignedBanner: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "sparkles")
+    private var verificationBanner: some View {
+        let isPkg = selectedFile?.pathExtension.lowercased() == "pkg"
+        let itemName = isPkg ? "PKG" : "App"
+
+        return HStack(spacing: 10) {
+            Image(systemName: signatureCheckCompleted
+                  ? (isAlreadySigned ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
+                  : "hourglass")
                 .font(.system(size: 16))
-                .foregroundStyle(.purple)
+                .foregroundStyle(signatureCheckCompleted
+                                 ? (isAlreadySigned ? Color.green : Color.orange)
+                                 : Color.secondary)
             
             VStack(alignment: .leading, spacing: 2) {
-                Text("Already Signed")
+                Text(signatureCheckCompleted
+                     ? (isAlreadySigned ? "Signature Detected" : "Signature Not Valid")
+                     : "Checking Signature…")
                     .font(.system(size: 11, weight: .bold))
-                Text("This file has a code signature. You can run checks directly.")
+                Text("Verify the \(itemName) signature, hardened runtime, notarization ticket, and Gatekeeper status.")
                     .font(.system(size: 9))
                     .foregroundStyle(.secondary)
             }
             
             Spacer()
             
-            Button("Verify Only") {
+            Button("Verify \(itemName)") {
                 if let file = selectedFile {
                     Task {
                         await service.verifyExistingSignature(targetPath: file.path)
@@ -1291,7 +1498,6 @@ struct NotaryView: View {
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
-            .tint(.purple)
             .disabled(service.isProcessing)
         }
         .padding(10)
@@ -1347,14 +1553,20 @@ struct NotaryView: View {
 
             await service.startWorkflow(
                 fileUrl: file,
+                appProcessingMode: appProcessingMode,
                 signAppIdentity: signAppBundle ? selectedAppIdentity : nil,
                 packageToPkg: packageToPkg,
                 signPkgIdentity: shouldSignInstallerPackage ? selectedPkgIdentity : nil,
                 packageToDmg: packageToDmg,
+                signDmgIdentity: shouldSignDiskImage
+                    ? distributionProject.diskImage.signingIdentity
+                    : nil,
                 packageToZip: packageToZip,
                 distributionProject: project,
                 distributionAssets: preparedAssets.assets,
-                performNotarization: shouldPerformNotarization,
+                notarizeApp: notarizeApp,
+                notarizePkg: notarizeInstaller || notarizeDirectPackage,
+                notarizeDmg: notarizeDiskImage,
                 credentialType: credentialType,
                 keychainProfile: selectedProfile,
                 apiKeyId: apiKeyId,

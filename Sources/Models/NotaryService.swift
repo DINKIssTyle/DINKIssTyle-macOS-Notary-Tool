@@ -7,6 +7,8 @@ private enum DistributionBuildError: LocalizedError {
     case commandFailed(String, Int32)
     case installerPackageUnavailable
     case invalidInstallLocation
+    case missingDiskImageSigningIdentity
+    case invalidInstallerScript(String, String)
 
     var errorDescription: String? {
         switch self {
@@ -16,6 +18,10 @@ private enum DistributionBuildError: LocalizedError {
             return "The installer package could not be built, so it cannot be added to the disk image."
         case .invalidInstallLocation:
             return "The installer destination must be a valid path without parent-directory components."
+        case .missingDiskImageSigningIdentity:
+            return "A Developer ID Application certificate is required to sign and notarize the disk image."
+        case let .invalidInstallerScript(name, reason):
+            return "The \(name) package script is invalid: \(reason)"
         }
     }
 }
@@ -77,6 +83,42 @@ private struct SystemToolReadiness: Sendable {
 public enum CredentialType: String, Sendable, Codable {
     case keychainProfile = "Keychain Profile"
     case apiKey = "App Store Connect API Key"
+}
+
+public enum AppProcessingMode: String, CaseIterable, Identifiable, Sendable, Codable {
+    case preserveExisting
+    case resignApp
+
+    public var id: String { rawValue }
+
+    public var title: String {
+        switch self {
+        case .preserveExisting: return "Preserve Existing"
+        case .resignApp: return "Re-sign App"
+        }
+    }
+}
+
+enum AppNotarizationDecision: Equatable {
+    case reuseExisting
+    case submitApp
+    case skipApp
+    case rejectMissingExistingTicket
+}
+
+enum WorkflowNotarizationPolicy {
+    static func appDecision(
+        processingMode: AppProcessingMode,
+        notarizeApp: Bool,
+        existingTicketIsValid: Bool
+    ) -> AppNotarizationDecision {
+        switch processingMode {
+        case .preserveExisting:
+            return existingTicketIsValid ? .reuseExisting : .rejectMissingExistingTicket
+        case .resignApp:
+            return notarizeApp ? .submitApp : .skipApp
+        }
+    }
 }
 
 public struct NotaryProfile: Identifiable, Codable, Sendable {
@@ -349,14 +391,18 @@ public class NotaryService: ObservableObject {
     /// Starts a signing/notarization workflow or a distribution-only build.
     public func startWorkflow(
         fileUrl: URL,
+        appProcessingMode: AppProcessingMode,
         signAppIdentity: String?,
         packageToPkg: Bool,
         signPkgIdentity: String?,
         packageToDmg: Bool,
+        signDmgIdentity: String?,
         packageToZip: Bool,
         distributionProject: DistributionProject,
         distributionAssets: [DistributionAssetKind: URL],
-        performNotarization: Bool,
+        notarizeApp: Bool,
+        notarizePkg: Bool,
+        notarizeDmg: Bool,
         credentialType: CredentialType,
         keychainProfile: String,
         apiKeyId: String,
@@ -373,9 +419,10 @@ public class NotaryService: ObservableObject {
         let parentDir = fileUrl.deletingLastPathComponent()
         let performsCodeSigning = fileExtension == "app" && !(signAppIdentity?.isEmpty ?? true)
         let buildsDistribution = packageToPkg || packageToDmg || packageToZip
+        let performsAnyNotarization = notarizeApp || notarizePkg || notarizeDmg
         
         let workflowName: String
-        if performNotarization {
+        if performsAnyNotarization {
             workflowName = "Notarization Workflow"
         } else if performsCodeSigning && buildsDistribution {
             workflowName = "Code Signing & Distribution Workflow"
@@ -390,12 +437,31 @@ public class NotaryService: ObservableObject {
         appendLog("Target File: \(path)")
 
         if fileExtension == "app",
+           appProcessingMode == .resignApp,
+           signAppIdentity?.isEmpty != false {
+            appendLog("Error: A Developer ID Application certificate is required to re-sign the app.")
+            isProcessing = false
+            currentStep = "Missing App Signing Certificate"
+            return
+        }
+
+        if fileExtension == "app",
            packageToPkg,
-           performNotarization,
+           notarizePkg,
            signPkgIdentity?.isEmpty != false {
             appendLog("Error: A Developer ID Installer certificate is required to sign and notarize a new PKG.")
             isProcessing = false
             currentStep = "Missing Installer Certificate"
+            return
+        }
+
+        if fileExtension == "app",
+           packageToDmg,
+           notarizeDmg,
+           signDmgIdentity?.isEmpty != false {
+            appendLog("Error: A Developer ID Application certificate is required to sign and notarize a new DMG.")
+            isProcessing = false
+            currentStep = "Missing DMG Signing Certificate"
             return
         }
         
@@ -403,7 +469,7 @@ public class NotaryService: ObservableObject {
         let tempDir = fileManager.temporaryDirectory
         
         var workingTarget = path
-        var distributionBuildHadError = false
+        var verificationTarget = path
         
         // 1. Code Sign .app (if app dropped and signing is enabled)
         if fileExtension == "app" {
@@ -425,8 +491,12 @@ public class NotaryService: ObservableObject {
             }
         }
 
-        var shouldSubmitAppForNotarization = fileExtension == "app" && performNotarization
-        if shouldSubmitAppForNotarization {
+        var shouldSubmitAppForNotarization = false
+        let shouldRequireExistingAppTicket = appProcessingMode == .preserveExisting
+            && (notarizeApp || notarizePkg || notarizeDmg)
+        let shouldEvaluateAppNotarization = fileExtension == "app"
+            && (notarizeApp || shouldRequireExistingAppTicket)
+        if shouldEvaluateAppNotarization {
             currentStep = "Validating Code Tree..."
             appendLog("\n--- Code Signing Preflight ---")
             let rootURL = URL(fileURLWithPath: workingTarget)
@@ -440,11 +510,26 @@ public class NotaryService: ObservableObject {
             }
             appendLog("Code signing preflight completed successfully.")
 
-            if await reuseExistingAppNotarizationIfAvailable(
-                at: rootURL,
-                appWasResigned: performsCodeSigning
+            let existingTicketIsValid = appProcessingMode == .preserveExisting
+                ? validateExistingAppNotarization(at: rootURL)
+                : false
+            switch WorkflowNotarizationPolicy.appDecision(
+                processingMode: appProcessingMode,
+                notarizeApp: notarizeApp,
+                existingTicketIsValid: existingTicketIsValid
             ) {
-                shouldSubmitAppForNotarization = false
+            case .reuseExisting:
+                appendLog("Preserving the existing app signature and notarization. App submission will be skipped.")
+            case .submitApp:
+                shouldSubmitAppForNotarization = true
+            case .skipApp:
+                appendLog("Skipped: App notarization was not selected.")
+            case .rejectMissingExistingTicket:
+                appendLog("Error: Preserve Existing was selected, but a valid stapled app ticket could not be verified.")
+                appendLog("The app was not modified. Select Re-sign App to sign and notarize it again.")
+                isProcessing = false
+                currentStep = "Existing App Notarization Required"
+                return
             }
         }
 
@@ -535,47 +620,16 @@ public class NotaryService: ObservableObject {
         }
         
         // 3. Optional packaging formats
-        
-        // 3a. Build Zip Archive (.zip)
-        if fileExtension == "app" && packageToZip {
-            currentStep = "Building Zip Archive..."
-            progress = 0.5
-            let zipOutputPath = parentDir.appendingPathComponent("\(appName).zip").path
-            appendLog("\n--- 3a. Building Zip Archive (.zip) ---")
-            appendLog("Compressing app bundle to: \(zipOutputPath)")
-            
-            if fileManager.fileExists(atPath: zipOutputPath) {
-                try? fileManager.removeItem(atPath: zipOutputPath)
-            }
-            
-            let zipArgs = ["-c", "-k", "--keepParent", workingTarget, zipOutputPath]
-            do {
-                let status = try await ShellManager.shared.runStream(
-                    executable: "/usr/bin/ditto",
-                    arguments: zipArgs,
-                    processId: activeProcessId
-                ) { _ in }
-                
-                if status == 0 {
-                    appendLog("Zip archive built successfully at: \(zipOutputPath)")
-                } else {
-                    distributionBuildHadError = true
-                    appendLog("Error: Zip archive build failed with status \(status)")
-                }
-            } catch {
-                distributionBuildHadError = true
-                appendLog("Zip archive error: \(error.localizedDescription)")
-            }
-        }
-        
+
         let pkgOutputPath = parentDir.appendingPathComponent("\(appName).pkg").path
+        let dmgOutputPath = parentDir.appendingPathComponent("\(appName).dmg").path
         var pkgBuildSucceeded = false
 
-        // 3b. Build Installer Package first so a completed PKG can be embedded in the DMG.
+        // 3a. Build Installer Package first so it becomes the payload for later formats.
         if fileExtension == "app" && packageToPkg {
             currentStep = "Building Package (.pkg)..."
             progress = 0.6
-            appendLog("\n--- 3b. Building Installer Package (.pkg) ---")
+            appendLog("\n--- 3a. Building Installer Package (.pkg) ---")
 
             do {
                 try await buildCustomizedInstaller(
@@ -593,7 +647,7 @@ public class NotaryService: ObservableObject {
                     workingTarget = pkgOutputPath
                 }
 
-                if performNotarization {
+                if notarizePkg {
                     appendLog("Notarizing PKG...")
                     var notaryArgs = ["notarytool", "submit", pkgOutputPath, "--wait"]
                     if credentialType == .keychainProfile {
@@ -612,40 +666,49 @@ public class NotaryService: ObservableObject {
 
                     if submitStatus == 0 {
                         appendLog("Stapling ticket to PKG...")
-                        _ = try await ShellManager.shared.runStream(
+                        let stapleStatus = try await ShellManager.shared.runStream(
                             executable: "/usr/bin/xcrun",
                             arguments: ["stapler", "staple", pkgOutputPath],
                             processId: activeProcessId
                         ) { [weak self] line in
                             Task { @MainActor in self?.appendLog("  \(line)") }
                         }
+                        guard stapleStatus == 0 else {
+                            throw DistributionBuildError.commandFailed("stapler staple PKG", stapleStatus)
+                        }
+                        verificationTarget = pkgOutputPath
                     } else {
-                        appendLog("Warning: PKG notarization failed.")
+                        throw DistributionBuildError.commandFailed("notarytool submit PKG", submitStatus)
                     }
                 } else {
                     appendLog("Skipped: PKG notarization (distribution-only build)")
                 }
             } catch {
-                distributionBuildHadError = true
                 appendLog("Packaging execution error: \(error.localizedDescription)")
+                isProcessing = false
+                currentStep = "PKG Build or Notarization Failed"
+                return
             }
         }
 
-        // 3c. Build Disk Image (.dmg)
+        // 3b. Build Disk Image from the latest completed payload.
         if fileExtension == "app" && packageToDmg {
             currentStep = "Building Disk Image..."
-            progress = 0.6
-            let dmgOutputPath = parentDir.appendingPathComponent("\(appName).dmg").path
-            appendLog("\n--- 3c. Building Disk Image (.dmg) ---")
+            progress = 0.75
+            appendLog("\n--- 3b. Building Disk Image (.dmg) ---")
 
             do {
-                let useInstallerPackage = packageToPkg && distributionProject.diskImage.includeInstallerPackage
+                let diskImagePayload = DistributionPipelinePolicy.diskImagePayload(
+                    buildInstaller: packageToPkg
+                )
+                let useInstallerPackage = diskImagePayload == .installerPackage
                 if useInstallerPackage && !pkgBuildSucceeded {
                     throw DistributionBuildError.installerPackageUnavailable
                 }
                 let diskImagePayloadURL = useInstallerPackage ? URL(fileURLWithPath: pkgOutputPath) : fileUrl
                 let diskImagePayloadPath = useInstallerPackage ? pkgOutputPath : workingTarget
                 var diskImageSettings = distributionProject.diskImage
+                diskImageSettings.includeInstallerPackage = useInstallerPackage
                 if useInstallerPackage {
                     diskImageSettings.includeApplicationsLink = false
                 }
@@ -662,19 +725,40 @@ public class NotaryService: ObservableObject {
                 )
                 appendLog("DMG disk image created at: \(dmgOutputPath)")
 
-                if let identity = signAppIdentity, !identity.isEmpty {
+                if let identity = signDmgIdentity, !identity.isEmpty {
                     appendLog("Signing DMG...")
+                    let baseIdentifier = Bundle(url: fileUrl)?.bundleIdentifier
+                        ?? "com.dinkisstyle.\(slug(appName))"
+                    let diskImageIdentifier = baseIdentifier + ".dmg"
                     let signStatus = try await ShellManager.shared.runStream(
                         executable: "/usr/bin/codesign",
-                        arguments: ["--force", "--timestamp", "-s", identity, dmgOutputPath],
+                        arguments: [
+                            "--force", "--timestamp",
+                            "--identifier", diskImageIdentifier,
+                            "-s", identity,
+                            dmgOutputPath
+                        ],
                         processId: activeProcessId
                     ) { [weak self] line in
                         Task { @MainActor in self?.appendLog("  \(line)") }
                     }
                     if signStatus != 0 { throw DistributionBuildError.commandFailed("codesign", signStatus) }
+
+                    let verificationStatus = try await ShellManager.shared.runStream(
+                        executable: "/usr/bin/codesign",
+                        arguments: ["--verify", "--strict", "--verbose=4", dmgOutputPath],
+                        processId: activeProcessId
+                    ) { [weak self] line in
+                        Task { @MainActor in self?.appendLog("  \(line)") }
+                    }
+                    guard verificationStatus == 0 else {
+                        throw DistributionBuildError.commandFailed("codesign verification DMG", verificationStatus)
+                    }
+                } else if notarizeDmg {
+                    throw DistributionBuildError.missingDiskImageSigningIdentity
                 }
 
-                if performNotarization {
+                if notarizeDmg {
                     appendLog("Notarizing DMG...")
                     var notaryArgs = ["notarytool", "submit", dmgOutputPath, "--wait"]
                     if credentialType == .keychainProfile {
@@ -691,27 +775,95 @@ public class NotaryService: ObservableObject {
                     }
                     if submitStatus == 0 {
                         appendLog("Stapling ticket to DMG...")
-                        _ = try await ShellManager.shared.runStream(
+                        let stapleStatus = try await ShellManager.shared.runStream(
                             executable: "/usr/bin/xcrun",
                             arguments: ["stapler", "staple", dmgOutputPath],
                             processId: activeProcessId
                         ) { [weak self] line in
                             Task { @MainActor in self?.appendLog("  \(line)") }
                         }
+                        guard stapleStatus == 0 else {
+                            throw DistributionBuildError.commandFailed("stapler staple DMG", stapleStatus)
+                        }
+
+                        let validationStatus = try await ShellManager.shared.runStream(
+                            executable: "/usr/bin/xcrun",
+                            arguments: ["stapler", "validate", dmgOutputPath],
+                            processId: activeProcessId
+                        ) { [weak self] line in
+                            Task { @MainActor in self?.appendLog("  \(line)") }
+                        }
+                        guard validationStatus == 0 else {
+                            throw DistributionBuildError.commandFailed("stapler validate DMG", validationStatus)
+                        }
                     } else {
-                        appendLog("Warning: DMG notarization failed.")
+                        throw DistributionBuildError.commandFailed("notarytool submit DMG", submitStatus)
                     }
                 } else {
                     appendLog("Skipped: DMG notarization (distribution-only build)")
                 }
+                if notarizeDmg {
+                    verificationTarget = dmgOutputPath
+                }
             } catch {
-                distributionBuildHadError = true
                 appendLog("DMG compilation error: \(error.localizedDescription)")
+                isProcessing = false
+                currentStep = "DMG Build or Notarization Failed"
+                return
+            }
+        }
+
+        // 3c. ZIP always wraps the last enabled distribution artifact.
+        if fileExtension == "app" && packageToZip {
+            currentStep = "Building Zip Archive..."
+            progress = 0.9
+            let zipOutputPath = parentDir.appendingPathComponent("\(appName).zip").path
+            let zipPayload = DistributionPipelinePolicy.zipPayload(
+                buildInstaller: packageToPkg,
+                buildDiskImage: packageToDmg
+            )
+            let zipPayloadPath: String
+            switch zipPayload {
+            case .app:
+                zipPayloadPath = path
+            case .installerPackage:
+                zipPayloadPath = pkgOutputPath
+            case .diskImage:
+                zipPayloadPath = dmgOutputPath
+            }
+
+            appendLog("\n--- 3c. Building Zip Archive (.zip) ---")
+            appendLog("ZIP payload: \(URL(fileURLWithPath: zipPayloadPath).lastPathComponent)")
+            appendLog("Compressing final distribution artifact to: \(zipOutputPath)")
+
+            if fileManager.fileExists(atPath: zipOutputPath) {
+                try? fileManager.removeItem(atPath: zipOutputPath)
+            }
+
+            let zipArgs = ["-c", "-k", "--keepParent", zipPayloadPath, zipOutputPath]
+            do {
+                let status = try await ShellManager.shared.runStream(
+                    executable: "/usr/bin/ditto",
+                    arguments: zipArgs,
+                    processId: activeProcessId
+                ) { _ in }
+
+                guard status == 0 else {
+                    throw DistributionBuildError.commandFailed("ditto ZIP", status)
+                }
+                appendLog("Zip archive built successfully at: \(zipOutputPath)")
+            } catch {
+                appendLog("Zip archive error: \(error.localizedDescription)")
+                isProcessing = false
+                currentStep = "ZIP Build Failed"
+                return
             }
         }
         
         // 4. Submit original target directly if it is already a .pkg or .dmg
-        if (fileExtension == "pkg" || fileExtension == "dmg") && performNotarization {
+        let shouldNotarizeDirectTarget = (fileExtension == "pkg" && notarizePkg)
+            || (fileExtension == "dmg" && notarizeDmg)
+        if shouldNotarizeDirectTarget {
             currentStep = "Submitting to Notary Service..."
             progress = 0.5
             appendLog("\n--- 3. Submitting to Notary Service ---")
@@ -765,25 +917,40 @@ public class NotaryService: ObservableObject {
             }
         }
         
-        if performNotarization {
+        if fileExtension == "app", appProcessingMode == .preserveExisting {
+            appendLog("\n--- Preserved App Integrity Check ---")
+            let originalAppURL = URL(fileURLWithPath: path)
+            guard verifyCodeTree(at: originalAppURL) else {
+                appendLog("Error: The preserved app no longer has a valid code signature.")
+                isProcessing = false
+                currentStep = "Preserved App Verification Failed"
+                return
+            }
+            if performsAnyNotarization, !validateExistingAppNotarization(at: originalAppURL) {
+                appendLog("Error: The preserved app notarization ticket is no longer valid.")
+                isProcessing = false
+                currentStep = "Preserved App Verification Failed"
+                return
+            }
+            appendLog("Verified: The original app signature and notarization were preserved.")
+        }
+
+        if performsAnyNotarization {
             currentStep = "Running Security Verification Checks..."
             progress = 0.95
             appendLog("\n--- 5. Generating Security Assessment ---")
 
-            let isPkgResult = workingTarget.hasSuffix(".pkg")
-            await runVerificationChecks(targetPath: workingTarget, isPkg: isPkgResult)
+            let isPkgResult = verificationTarget.hasSuffix(".pkg")
+            await runVerificationChecks(targetPath: verificationTarget, isPkg: isPkgResult)
         } else {
             appendLog("\nSkipped: Apple notarization and notarization verification (disabled)")
         }
 
         progress = 1.0
         isProcessing = false
-        if performNotarization {
+        if performsAnyNotarization {
             currentStep = "Completed Successfully"
             appendLog("\n=== All Steps Completed ===")
-        } else if distributionBuildHadError {
-            currentStep = "Distribution Build Finished with Errors"
-            appendLog("\n=== Distribution Build Finished with Errors ===")
         } else if buildsDistribution {
             currentStep = "Distribution Build Completed"
             appendLog("\n=== Distribution Build Completed ===")
@@ -845,17 +1012,9 @@ public class NotaryService: ObservableObject {
         appendLog("Code tree signed and verified successfully.")
     }
 
-    private func reuseExistingAppNotarizationIfAvailable(
-        at appURL: URL,
-        appWasResigned: Bool
-    ) async -> Bool {
+    private func validateExistingAppNotarization(at appURL: URL) -> Bool {
         appendLog("\n--- Existing App Notarization Check ---")
-
-        if appWasResigned {
-            appendLog("The app was re-signed in this workflow, so any previous notarization cannot be reused.")
-            return false
-        }
-
+        appendLog("Preserve Existing is selected. The app will only be inspected, never modified.")
         appendLog("Checking for a valid existing stapled ticket...")
         do {
             let (status, output) = try ShellManager.shared.runSync(
@@ -863,41 +1022,11 @@ public class NotaryService: ObservableObject {
                 arguments: ["stapler", "validate", appURL.path]
             )
             appendLog(output)
-            if CodeSigningSupport.canReuseAppNotarization(
-                wasResigned: appWasResigned,
-                staplerStatus: status
-            ) {
-                appendLog("Reusing the existing app notarization. App submission will be skipped.")
-                return true
-            }
+            return status == 0
         } catch {
             appendLog("Existing ticket validation error: \(error.localizedDescription)")
+            return false
         }
-
-        appendLog("No valid stapled ticket was found. Attempting to retrieve an existing ticket...")
-        do {
-            let stapleStatus = try await ShellManager.shared.runStream(
-                executable: "/usr/bin/xcrun",
-                arguments: ["stapler", "staple", appURL.path],
-                processId: activeProcessId
-            ) { [weak self] line in
-                Task { @MainActor in self?.appendLog("  \(line)") }
-            }
-
-            if CodeSigningSupport.canReuseAppNotarization(
-                wasResigned: appWasResigned,
-                staplerStatus: stapleStatus
-            ) {
-                appendLog("Retrieved the existing app ticket. App submission will be skipped.")
-                return true
-            }
-            appendLog("No reusable app ticket was available. The app will be submitted for notarization.")
-        } catch {
-            appendLog("Existing ticket retrieval error: \(error.localizedDescription)")
-            appendLog("The app will be submitted for notarization.")
-        }
-
-        return false
     }
 
     private func verifyCodeTree(at rootURL: URL) -> Bool {
@@ -972,6 +1101,7 @@ public class NotaryService: ObservableObject {
         let resourcesDirectory = buildDirectory.appendingPathComponent("Resources", isDirectory: true)
         let componentURL = buildDirectory.appendingPathComponent("component.pkg")
         let distributionURL = buildDirectory.appendingPathComponent("Distribution.xml")
+        let scriptsDirectory = buildDirectory.appendingPathComponent("Scripts", isDirectory: true)
         defer { try? fileManager.removeItem(at: buildDirectory) }
 
         try fileManager.createDirectory(at: resourcesDirectory, withIntermediateDirectories: true)
@@ -993,15 +1123,23 @@ public class NotaryService: ObservableObject {
         let displayedInstallLocation = installsForCurrentUser ? "~\(installLocation)" : installLocation
         appendLog("Creating component package...")
         appendLog("Installer destination: \(settings.installationDomain.title) \(displayedInstallLocation)")
+        let includesScripts = try prepareInstallerScripts(
+            settings: settings,
+            directory: scriptsDirectory
+        )
+        var componentArguments = [
+            "--component", workingTarget,
+            "--install-location", installLocation,
+            "--identifier", identifier,
+            "--version", version
+        ]
+        if includesScripts {
+            componentArguments.append(contentsOf: ["--scripts", scriptsDirectory.path])
+        }
+        componentArguments.append(componentURL.path)
         let componentStatus = try await ShellManager.shared.runStream(
             executable: "/usr/bin/pkgbuild",
-            arguments: [
-                "--component", workingTarget,
-                "--install-location", installLocation,
-                "--identifier", identifier,
-                "--version", version,
-                componentURL.path
-            ],
+            arguments: componentArguments,
             processId: activeProcessId
         ) { [weak self] line in
             Task { @MainActor in self?.appendLog("  \(line)") }
@@ -1203,6 +1341,60 @@ public class NotaryService: ObservableObject {
             }
             appendLog("Embedded \(rtfdPages.count) RTFD Installer page resource(s).")
         }
+    }
+
+    private func prepareInstallerScripts(
+        settings: InstallerSettings,
+        directory: URL
+    ) throws -> Bool {
+        let configuredScripts: [(InstallerScriptKind, Bool, String?)] = [
+            (.preinstall, settings.includePreinstallScript, settings.preinstallScript),
+            (.postinstall, settings.includePostinstallScript, settings.postinstallScript)
+        ]
+        let enabledScripts = configuredScripts.filter { $0.1 }
+        guard !enabledScripts.isEmpty else { return false }
+
+        let fileManager = FileManager.default
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+
+        for (kind, _, savedSource) in enabledScripts {
+            var source = savedSource ?? kind.defaultSource
+            source = source
+                .replacingOccurrences(of: "\r\n", with: "\n")
+                .replacingOccurrences(of: "\r", with: "\n")
+
+            guard !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw DistributionBuildError.invalidInstallerScript(
+                    kind.fileName,
+                    "the enabled script is empty."
+                )
+            }
+            guard source.hasPrefix("#!") else {
+                throw DistributionBuildError.invalidInstallerScript(
+                    kind.fileName,
+                    "the first line must be an interpreter directive such as #!/bin/sh."
+                )
+            }
+            guard !source.contains("\0") else {
+                throw DistributionBuildError.invalidInstallerScript(
+                    kind.fileName,
+                    "null characters are not supported."
+                )
+            }
+            if !source.hasSuffix("\n") {
+                source.append("\n")
+            }
+
+            let scriptURL = directory.appendingPathComponent(kind.fileName)
+            try source.write(to: scriptURL, atomically: true, encoding: .utf8)
+            try fileManager.setAttributes(
+                [.posixPermissions: NSNumber(value: Int16(0o755))],
+                ofItemAtPath: scriptURL.path
+            )
+            appendLog("Included package script: \(kind.fileName)")
+        }
+
+        return true
     }
 
     private func normalizedInstallLocation(_ rawValue: String) throws -> String {
@@ -1480,6 +1672,9 @@ public class NotaryService: ObservableObject {
     
     /// Runs verification tools to populate checklist status.
     private func runVerificationChecks(targetPath: String, isPkg: Bool) async {
+        let targetExtension = URL(fileURLWithPath: targetPath).pathExtension.lowercased()
+        let isApp = targetExtension == "app"
+
         // 1. Code Signature Verification
         verificationItems[0].status = .running
         appendLog("Verifying signature integrity...")
@@ -1494,7 +1689,7 @@ public class NotaryService: ObservableObject {
             } catch {
                 verificationItems[0].status = .failure
             }
-        } else if URL(fileURLWithPath: targetPath).pathExtension.lowercased() == "app" {
+        } else if isApp {
             verificationItems[0].status = verifyCodeTree(at: URL(fileURLWithPath: targetPath)) ? .success : .failure
         } else {
             do {
@@ -1511,28 +1706,12 @@ public class NotaryService: ObservableObject {
         
         // 2. Hardened Runtime Check (only for apps)
         verificationItems[1].status = .running
-        if isPkg {
-            // PKG files themselves do not have Hardened Runtime flags, we say success if signing passed,
-            // or we display idle/success by default.
+        if !isApp {
             verificationItems[1].status = .success
-            appendLog("Skipped Hardened Runtime check (target is a installer package).")
-        } else if URL(fileURLWithPath: targetPath).pathExtension.lowercased() == "app" {
+            appendLog("Skipped Hardened Runtime check (not applicable to \(targetExtension.uppercased())).")
+        } else {
             appendLog("Checking Hardened Runtime across the code tree...")
             verificationItems[1].status = verifyHardenedRuntimeTree(at: URL(fileURLWithPath: targetPath)) ? .success : .failure
-        } else {
-            appendLog("Checking for Hardened Runtime flag...")
-            let detailArgs = ["-d", "-vvv", targetPath]
-            do {
-                let (_, output) = try ShellManager.shared.runSync(executable: "/usr/bin/codesign", arguments: detailArgs)
-                appendLog(output)
-                if output.contains("runtime") || output.contains("flags=0x10000") {
-                    verificationItems[1].status = .success
-                } else {
-                    verificationItems[1].status = .failure
-                }
-            } catch {
-                verificationItems[1].status = .failure
-            }
         }
         
         runNotarizationVerification(targetPath: targetPath, isPkg: isPkg)
@@ -1591,6 +1770,8 @@ public class NotaryService: ObservableObject {
     /// Runs verification checks on an already signed and notarized application or package.
     public func verifyExistingSignature(targetPath: String) async {
         isProcessing = true
+        currentStep = "Verifying Existing Distribution..."
+        progress = 0
         logOutput = ""
         for i in 0..<verificationItems.count {
             verificationItems[i].status = .idle
@@ -1603,6 +1784,7 @@ public class NotaryService: ObservableObject {
         
         // 1. Code Signature
         verificationItems[0].status = .running
+        progress = 0.15
         appendLog("Checking code signature...")
         if isPkg {
             do {
@@ -1622,6 +1804,7 @@ public class NotaryService: ObservableObject {
 
         // 2. Hardened Runtime
         verificationItems[1].status = .running
+        progress = 0.4
         if isPkg {
             verificationItems[1].status = .success
             appendLog("Skipped Hardened Runtime check (target is an installer package).")
@@ -1630,8 +1813,11 @@ public class NotaryService: ObservableObject {
             verificationItems[1].status = verifyHardenedRuntimeTree(at: URL(fileURLWithPath: targetPath)) ? .success : .failure
         }
 
+        progress = 0.65
         runNotarizationVerification(targetPath: targetPath, isPkg: isPkg)
 
+        progress = 1
+        currentStep = "Verification Completed"
         isProcessing = false
         appendLog("=== Verification Completed ===")
     }
@@ -1672,7 +1858,17 @@ public class NotaryService: ObservableObject {
         verificationItems[3].status = isStapled ? .success : .failure
 
         appendLog("Simulating macOS Gatekeeper installation check...")
-        let spctlArgs = ["--assess", "-vv", "--type", isPkg ? "install" : "execute", targetPath]
+        let spctlArgs: [String]
+        if targetURL.pathExtension.lowercased() == "dmg" {
+            spctlArgs = [
+                "--assess", "-vv",
+                "--type", "open",
+                "--context", "context:primary-signature",
+                targetPath
+            ]
+        } else {
+            spctlArgs = ["--assess", "-vv", "--type", isPkg ? "install" : "execute", targetPath]
+        }
         do {
             let (status, output) = try ShellManager.shared.runSync(
                 executable: "/usr/sbin/spctl",

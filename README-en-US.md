@@ -46,9 +46,11 @@ If you Drag & Drop a signed app bundle, it will indicate that it is already sign
 
 <div align="center"><img src="Docs/Screenshot-Main-Part-02.png" alt="Main Screen" width="600"><br><br></div>
 
-- **Code Signing**: Turn this on and sign with the selected `Developer ID Applications` certificate.
-- **Notarization**: This performs the final notarization after signing.
-- **Notary Credentials**: Select the `Notary Profiles` to be used for notarization.
+- **Application Processing**:
+  - **Preserve Existing** validates the existing signature and stapled notarization ticket on an app exported from Xcode and never modifies the app.
+  - **Re-sign App** signs the app again with the selected `Developer ID Application` certificate and notarizes it again when notarization is enabled.
+- **Per-target notarization**: Instead of a global notarization switch, choose notarization directly in the app, PKG, and DMG sections. If the existing app ticket fails validation in Preserve Existing mode, the workflow stops instead of modifying or automatically re-notarizing the app.
+- **Notarization Account**: The last-used Keychain notary profile is selected automatically. Use **Change…** only when another account or an API key is needed.
 
 After clicking the `Sign & Notarize` button, please wait until signing and notarization are complete. Once the operation is finished, the signing and notarization verification status will be displayed in the `Verification Checklist Report` on the right.
 
@@ -62,11 +64,12 @@ You can customize a PKG quickly and easily using DKST macOS Notary Tool.
 <div align="center"><img src="Docs/Screenshot-Main-Part-04.png" alt="Main Screen" width="300"><img src="Docs/Screenshot-Main-Part-05.png" alt="Main Screen" width="300"><br><br></div>
 
 1. Turn on **Build Installer (.pkg)**.
-2. Select the `Developer ID Installer` certificate.  
+2. Turn on **Sign & Notarize PKG** for a distributable signed and notarized package.
+3. Select the `Developer ID Installer` certificate.
    Even if the app is already notarized and unchanged, you must notarize the .pkg again for each regeneration.
-3. **Installer Title**: Enter the title bar name to be used in the installer. It automatically inserts the app bundle contents, but you can change it if desired.
-4. **Package Identifier**: Automatically inserts the app bundle contents. Change as needed.
-5. **Installer Pages**: Select and modify the screens displayed at each stage of the installer.
+4. **Installer Title**: Enter the title bar name to be used in the installer. It automatically inserts the app bundle contents, but you can change it if desired.
+5. **Package Identifier**: Automatically inserts the app bundle contents. Change as needed.
+6. **Installer Pages**: Select and modify the screens displayed at each stage of the installer.
     1. Welcome: This is the first screen users see when running the installer.
        <div align="center"><img src="Docs/Screenshot-PKG-Welcome-01.png" alt="Welcome Screen" width="550"><br></div>
     1. Read Me: This is the content that should be read.
@@ -74,12 +77,12 @@ You can customize a PKG quickly and easily using DKST macOS Notary Tool.
     1. Conclusion: This is the final screen after the installer installation is complete.
     1. Each screen can be edited by pressing the `Edit` button.
     1. The `Edit` screen is an editor that supports Rich Text Format Directory (.rtfd). You can paste formatted text and images. The easiest way to create and edit an .rtfd document is by using macOS's TextEdit.app. Decorate the document, copy it, and paste it into the `Edit` screen.
-6. **Installer Background**: The .pkg installer supports a background image. Click `Edit PKG-Installer-BG-TEMP.psd in this project.` to open the Photoshop (.PSD) template stored inside the `.dnt` project. Save your edits to the PSD and it will be converted to PNG automatically during the build. You can still import a separate image with `Choose...`.
-7. **After Installation**: This is the type of button displayed to the user when the installer installation is complete.
+7. **Installer Background**: The .pkg installer supports a background image. Click `Edit PKG-Installer-BG-TEMP.psd in this project.` to open the Photoshop (.PSD) template stored inside the `.dnt` project. Save your edits to the PSD and it will be converted to PNG automatically during the build. You can still import a separate image with `Choose...`.
+8. **After Installation**: This is the type of button displayed to the user when the installer installation is complete.
     1. No Action: This is the most common type. The user can finish the installation and close the installer with a close button.
     1. Require Logout: Upon completion of the installation, the only button provided to the user is the logout button. Unless the installer is forcibly closed, the user must log out.
     1. Require Restart: Upon completion of the installation, the only button provided to the user is the reboot button. Unless the installer is forcibly closed, the user must restart.
-8. **Advanced Options**: This option is useful if the app bundle's installation location is not `/Applications`. For example, input method editors fall into this category. Install the app bundle in the `Install Location` specified by the System or user account.
+9. **Advanced Options**: This option is useful if the app bundle's installation location is not `/Applications`. For example, input method editors fall into this category. Install the app bundle in the `Install Location` specified by the System or user account.
 
 ## Distributing with DMG
 You can customize a DMG disk quickly and easily using DKST macOS Notary Tool.
@@ -87,21 +90,28 @@ You can customize a DMG disk quickly and easily using DKST macOS Notary Tool.
 <div align="center"><img src="Docs/Screenshot-Main-Part-06.png" alt="Main Screen" width="300"><br><br></div>
 
 1. Turn on **Build Disk Image (.dmg)**.
-2. Checking **Put Installer Package in DMG** allows you to use the previously created .PKG file as the content of the .DMG disk.
-3. **Volume Name**: This is the name of the mounted DMG disk volume. You can modify it as desired.
-4. **Layout Preset**: You can choose from two presets or a manual layout.
+2. Turn on **Sign & Notarize DMG** for a distributable notarized disk image.
+3. Under **Sign Disk Image**, select the `Developer ID Application` certificate used to sign the DMG. DMG signing is required for notarization and is independent of app signing.
+4. If **Build Installer (.pkg)** is also enabled, the completed PKG is automatically placed inside the DMG. Otherwise, the app bundle is placed inside the DMG.
+5. **Volume Name**: This is the name of the mounted DMG disk volume. You can modify it as desired.
+6. **Layout Preset**: You can choose from two presets or a manual layout.
     1. **Template 1**: Layout with the app icon on the left and the Applications folder on the right.
     1. **Template 2**: Layout with the app icon at the top and the Applications folder at the bottom.
        <div align="center"><img src="Docs/Screenshot-DMG-Layout-01.png" alt="Template 2" width="550"><br></div>
     1. When selecting a template, a prompt such as `Edit DMG-BG-TEMP.psd in this project.` opens the background PSD stored inside the `.dnt` project. Save your edits to the PSD and it will be converted to PNG automatically during the build.
-    1. If you select `Put Installer Package in DMG` or do not select `Add Applications Shortcut`, a separate layout with the app or .PKG icon in the center will be selected. You can also open a Photoshop (.PSD) file helpful for background editing in this case.
+    1. If PKG building is enabled or `Add Applications Shortcut` is not selected, a single-item layout with the app or PKG icon in the center is selected. You can also open a Photoshop (.PSD) file helpful for background editing in this case.
        <div align="center"><img src="Docs/Screenshot-DMG-Layout-02.png" alt="Template 2" width="550"><br></div>
 5. **Add Applications Shortcut**: Select whether to display the Applications folder.
 
 ## Distributing with ZIP
 While signing and notarization are unlikely to be corrupted during compression, Apple recommends compressing using ditto to prevent any potential damage.
 
-When **Build Zip Archive (.zip)** is enabled, the app bundle is compressed into a .ZIP file using ditto.
+**Build Zip Archive (.zip)** always runs last and uses `ditto` to compress the final artifact produced by the preceding stages.
+
+- ZIP only: compress the app bundle
+- PKG + ZIP: compress the completed PKG
+- PKG + DMG + ZIP: place the PKG in the DMG, then compress that DMG
+- DMG + ZIP: place the app in the DMG, then compress that DMG
 
 ## About Auto-Save and Loading
 DKST macOS Notary Tool automatically creates a `.DNT` project package in the loaded app bundle folder. Finder presents it as one document, while its project settings, editable PSD templates, and assets are stored in an internal folder structure.

@@ -26,6 +26,7 @@ struct InstallerCustomizationView: View {
     let removeBackground: () -> Void
     let editTemplate: (String) -> Void
     @State private var editingPage: InstallerPageKind?
+    @State private var editingScript: InstallerScriptKind?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -106,6 +107,27 @@ struct InstallerCustomizationView: View {
                                 .font(.system(size: 10))
                         }
                     }
+
+                    Divider()
+                    Text("Package Scripts")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.secondary)
+
+                    Text("Plain-text shell scripts are embedded as executable preinstall and postinstall files.")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    installerScript(
+                        .preinstall,
+                        isOn: $settings.includePreinstallScript,
+                        source: settings.preinstallScript
+                    )
+                    installerScript(
+                        .postinstall,
+                        isOn: $settings.includePostinstallScript,
+                        source: settings.postinstallScript
+                    )
                 }
                 .padding(.top, 6)
             } label: {
@@ -127,6 +149,14 @@ struct InstallerCustomizationView: View {
                 initialRTFData: pageRTFData(page)
             ) { text, rtfData in
                 savePage(page, text: text, rtfData: rtfData)
+            }
+        }
+        .sheet(item: $editingScript) { script in
+            InstallerScriptEditorSheet(
+                script: script,
+                initialText: scriptSource(script) ?? script.defaultSource
+            ) { source in
+                saveScript(script, source: source)
             }
         }
     }
@@ -192,6 +222,60 @@ struct InstallerCustomizationView: View {
         case .conclusion:
             settings.conclusionText = text
             settings.conclusionRTF = rtfData
+        }
+    }
+
+    @ViewBuilder
+    private func installerScript(
+        _ script: InstallerScriptKind,
+        isOn: Binding<Bool>,
+        source: String?
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack {
+                Toggle(script.title, isOn: isOn)
+                    .font(.system(size: 10, weight: .medium))
+                Spacer()
+                if isOn.wrappedValue {
+                    Button("Edit…") {
+                        editingScript = script
+                    }
+                    .controlSize(.small)
+                }
+            }
+
+            if isOn.wrappedValue {
+                let previewSource = source ?? script.defaultSource
+                ZStack(alignment: .topLeading) {
+                    PlainTextEditor(text: .constant(previewSource), isEditable: false)
+                    if previewSource.isEmpty {
+                        Text("Empty script")
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(.tertiary)
+                            .padding(9)
+                    }
+                }
+                .frame(height: 82)
+                .background(Color(NSColor.textBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: 5))
+                .overlay(RoundedRectangle(cornerRadius: 5).stroke(Color.secondary.opacity(0.18)))
+            }
+        }
+    }
+
+    private func scriptSource(_ script: InstallerScriptKind) -> String? {
+        switch script {
+        case .preinstall: return settings.preinstallScript
+        case .postinstall: return settings.postinstallScript
+        }
+    }
+
+    private func saveScript(_ script: InstallerScriptKind, source: String) {
+        switch script {
+        case .preinstall:
+            settings.preinstallScript = source
+        case .postinstall:
+            settings.postinstallScript = source
         }
     }
 
@@ -288,6 +372,60 @@ private struct InstallerPageEditorSheet: View {
     }
 }
 
+private struct InstallerScriptEditorSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let script: InstallerScriptKind
+    let onSave: (String) -> Void
+    @State private var draftText: String
+
+    init(
+        script: InstallerScriptKind,
+        initialText: String,
+        onSave: @escaping (String) -> Void
+    ) {
+        self.script = script
+        self.onSave = onSave
+        _draftText = State(initialValue: initialText)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Edit \(script.title)")
+                .font(.title3)
+                .fontWeight(.semibold)
+
+            Text("The script is stored as plain text and embedded as an executable file named \(script.fileName).")
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+
+            PlainTextEditor(text: $draftText)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color(NSColor.textBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: 7))
+                .overlay(RoundedRectangle(cornerRadius: 7).stroke(Color.secondary.opacity(0.22)))
+
+            Divider()
+
+            HStack {
+                Spacer()
+                Button("Cancel") {
+                    dismiss()
+                }
+                .keyboardShortcut(.cancelAction)
+
+                Button("Save") {
+                    onSave(draftText)
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+        .frame(minWidth: 760, idealWidth: 900, minHeight: 480, idealHeight: 560)
+        .interactiveDismissDisabled()
+    }
+}
+
 struct DiskImageCustomizationView: View {
     @Binding var settings: DiskImageSettings
     let canUseInstallerPackage: Bool
@@ -302,9 +440,10 @@ struct DiskImageCustomizationView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             if canUseInstallerPackage {
-                Toggle("Put Installer Package in DMG", isOn: $settings.includeInstallerPackage)
+                Label("DMG Payload: Built Installer Package (.pkg)", systemImage: "arrow.right.circle.fill")
                     .font(.system(size: 10, weight: .medium))
-                Text("Replaces the app bundle in the disk image with the completed .pkg installer.")
+                    .foregroundStyle(.green)
+                Text("PKG is built first and automatically becomes the DMG payload.")
                     .font(.system(size: 9))
                     .foregroundStyle(.tertiary)
             }
@@ -354,19 +493,19 @@ struct DiskImageCustomizationView: View {
 
             Divider()
             if isCustomLayout {
-                Toggle(settings.includeInstallerPackage && canUseInstallerPackage ? "Center Installer Icon" : "Center App Icon", isOn: $settings.centerAppIcon)
+                Toggle(usesInstallerPackage ? "Center Installer Icon" : "Center App Icon", isOn: $settings.centerAppIcon)
                     .font(.system(size: 10, weight: .medium))
             }
 
             if !settings.centerAppIcon {
                 HStack(spacing: 8) {
-                    integerField(settings.includeInstallerPackage && canUseInstallerPackage ? "Installer X" : "App X", value: $settings.appIconX)
-                    integerField(settings.includeInstallerPackage && canUseInstallerPackage ? "Installer Y" : "App Y", value: $settings.appIconY)
+                    integerField(usesInstallerPackage ? "Installer X" : "App X", value: $settings.appIconX)
+                    integerField(usesInstallerPackage ? "Installer Y" : "App Y", value: $settings.appIconY)
                 }
                 .disabled(!isCustomLayout)
             }
 
-            if !(settings.includeInstallerPackage && canUseInstallerPackage) {
+            if !usesInstallerPackage {
                 Toggle("Add Applications Shortcut", isOn: $settings.includeApplicationsLink)
                     .font(.system(size: 10, weight: .medium))
                 if settings.includeApplicationsLink {
@@ -385,7 +524,21 @@ struct DiskImageCustomizationView: View {
         }
         .padding(.leading, 12)
         .padding(.top, 2)
-        .onAppear(perform: synchronizeLayoutMode)
+        .onAppear {
+            settings.includeInstallerPackage = usesInstallerPackage
+            if usesInstallerPackage {
+                settings.includeApplicationsLink = false
+            }
+            synchronizeLayoutMode()
+        }
+        .onChange(of: canUseInstallerPackage) { includesInstaller in
+            settings.includeInstallerPackage = includesInstaller
+            settings.includeApplicationsLink =
+                DiskImageLayoutPolicy.includesApplicationsLinkAfterInstallerToggle(
+                    includesInstaller: includesInstaller
+                )
+            synchronizeLayoutMode()
+        }
         .onChange(of: isSingleIconLayout) { _ in
             synchronizeLayoutMode()
         }
@@ -396,11 +549,18 @@ struct DiskImageCustomizationView: View {
     }
 
     private var isSingleIconLayout: Bool {
-        (settings.includeInstallerPackage && canUseInstallerPackage) || !settings.includeApplicationsLink
+        usesInstallerPackage || !settings.includeApplicationsLink
+    }
+
+    private var usesInstallerPackage: Bool {
+        canUseInstallerPackage
     }
 
     private var availableTemplates: [DiskImageLayoutTemplate] {
-        isSingleIconLayout ? [.template1, .custom] : Array(DiskImageLayoutTemplate.allCases)
+        DiskImageLayoutPolicy.availableTemplates(
+            includesInstaller: usesInstallerPackage,
+            includesApplicationsLink: settings.includeApplicationsLink
+        )
     }
 
     private var templateFileName: String? {

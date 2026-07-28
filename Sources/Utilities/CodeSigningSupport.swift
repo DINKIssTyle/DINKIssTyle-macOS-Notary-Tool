@@ -88,10 +88,6 @@ enum CodeSigningSupport {
         status == 0 && output.range(of: "source=Notarized", options: .caseInsensitive) != nil
     }
 
-    static func canReuseAppNotarization(wasResigned: Bool, staplerStatus: Int32) -> Bool {
-        !wasResigned && staplerStatus == 0
-    }
-
     static func identityNames(codeSigningOutput: String, basicOutput: String) -> IdentityNames {
         let codeSigningNames = validIdentityNames(in: codeSigningOutput)
         let basicNames = validIdentityNames(in: basicOutput)
